@@ -18,12 +18,15 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from app.api.dependencies import get_resource_service, require_admin, require_user
 from app.core.config import Settings, get_settings
 from app.core.errors import NotFoundError
+from app.core.logging import get_logger
 from app.domain.registry import get_resource
 from app.services.password import hash_password, looks_hashed, verify_password
 from app.services.resource_service import ResourceService
 from app.services.sessions import COOKIE_NAME, issue_session
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+logger = get_logger("curcle.auth")
 
 _AUTH_USERS = "auth-users"
 EMAIL_MIN = 3
@@ -206,27 +209,42 @@ def _exists(service: ResourceService, email: str) -> bool:
         return False
 
 
-# Default accounts created only when missing (fresh DB). Passwords are hashed and
-# never shipped to the browser. Rotate them after first login.
-_SEED_ACCOUNTS = (
-    ("akshae@optiminastic.com", "Akshae", "admin", "Admin@2026"),
-    ("hr@optiminastic.com", "HR Team", "hr", "opti@100"),
-)
-
-
 def seed_admin_accounts(database: Any) -> None:
-    """Ensure the default dashboard accounts exist (hashed). Idempotent; skips any
-    account that already exists (including legacy plaintext rows)."""
+    """Create the first admin account on a fresh DB, from SEED_ADMIN_EMAIL /
+    SEED_ADMIN_PASSWORD.
+
+    Credentials are NEVER hardcoded here — a password committed to the repo is a
+    password every reader of the repo (and its git history) knows. When the env
+    vars are unset we seed nothing and log it: an app with no accounts is a
+    recoverable state, an app with a publicly-known admin password is not.
+
+    Idempotent — skips the account if it already exists, so existing installs and
+    their current logins are untouched.
+    """
     from app.repositories.document_repository import SqlAlchemyDocumentRepository
+
+    settings = get_settings()
+    email = (settings.seed_admin_email or "").strip().lower()
+    password = settings.seed_admin_password or ""
+    if not email or not password:
+        logger.info("SEED_ADMIN_EMAIL/PASSWORD not set — skipping account seeding.")
+        return
 
     session = database.session()
     try:
         service = ResourceService(SqlAlchemyDocumentRepository(session))
-        for email, name, role, default_pw in _SEED_ACCOUNTS:
-            if not _exists(service, email):
-                service.create(
-                    get_resource(_AUTH_USERS),
-                    {"id": email, "email": email, "role": role, "name": name, "password": hash_password(default_pw)},
-                )
+        if _exists(service, email):
+            return
+        service.create(
+            get_resource(_AUTH_USERS),
+            {
+                "id": email,
+                "email": email,
+                "role": "admin",
+                "name": settings.seed_admin_name or "Admin",
+                "password": hash_password(password),
+            },
+        )
+        logger.info("Seeded initial admin account %s.", email)
     finally:
         session.close()

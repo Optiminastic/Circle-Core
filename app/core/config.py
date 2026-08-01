@@ -145,6 +145,13 @@ class Settings(BaseSettings):
     # in again after this many hours of NO activity. Default 30 days.
     session_ttl_hours: int = 720
 
+    # --- First-run admin seeding ---
+    # Used ONLY to create the very first admin on an empty DB. Unset = seed nothing.
+    # Never hardcode credentials in source; see auth.seed_admin_accounts.
+    seed_admin_email: str = ""
+    seed_admin_password: str = ""
+    seed_admin_name: str = "Admin"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
