@@ -24,6 +24,7 @@ is stale):
 from __future__ import annotations
 
 import base64
+import io
 import json
 import mimetypes
 import urllib.error
@@ -53,6 +54,41 @@ DOC_TYPE_ROUTING: dict[str, tuple[str, str]] = {
 
 # Our stored gender label → OnGrid's single-letter code (M/F/T/O/U).
 GENDER_TO_ONGRID: dict[str, str] = {"Male": "M", "Female": "F", "Other": "O"}
+
+
+def _rasterize_pdf_first_page(data: bytes) -> bytes:
+    """Render a PDF's first page to a PNG. Import is local — these are only
+    needed on the (uncommon) PDF-upload path, not on every request."""
+    import pypdfium2 as pdfium
+
+    pdf = pdfium.PdfDocument(data)
+    try:
+        # scale=2.0 -> ~144 DPI, sharp enough for OnGrid's OCR to read.
+        bitmap = pdf[0].render(scale=2.0)
+        buf = io.BytesIO()
+        bitmap.to_pil().save(buf, format="PNG")
+        return buf.getvalue()
+    finally:
+        pdf.close()
+
+
+def _ensure_image(filename: str, data: bytes, content_type: str | None) -> tuple[str, bytes, str]:
+    """OnGrid's OCR `/extract` endpoints (pan, vid) only accept image files —
+    a PDF is rejected with `400 {"code":327,"message":"File Type not supported"}`.
+    Rasterize the first page to PNG when the source is a PDF; pass anything
+    else through untouched. Falls back to the original bytes if rendering
+    fails, so a bad/encrypted PDF still gets *something* uploaded (and OnGrid's
+    own error is what surfaces) rather than a silent 500 here."""
+    is_pdf = content_type == "application/pdf" or filename.lower().endswith(".pdf")
+    if not is_pdf:
+        return filename, data, content_type or "application/octet-stream"
+    try:
+        png_bytes = _rasterize_pdf_first_page(data)
+    except Exception:  # noqa: BLE001 - best-effort conversion, never block the upload
+        logger.exception("Could not rasterize PDF %s for OnGrid — sending as-is", filename)
+        return filename, data, content_type or "application/pdf"
+    new_filename = f"{filename.rsplit('.', 1)[0]}.png"
+    return new_filename, png_bytes, "image/png"
 
 
 class OnGridError(RuntimeError):
@@ -169,6 +205,8 @@ class OnGridClient:
         """
         mode, slug = DOC_TYPE_ROUTING.get(doc_type, ("other", doc_type))
         if mode == "extract":
+            # The extract/OCR endpoints reject PDFs outright — rasterize first.
+            filename, data, content_type = _ensure_image(filename, data, content_type)
             path = f"/v1/individual/{individual_id}/doc/{slug}/extract"
             body, ctype = self._multipart(filename, data, content_type, {})
         else:
