@@ -93,8 +93,8 @@ async def upload_request_document(
     if len(data) > limit:
         raise ValidationError(f"File exceeds the {settings.max_upload_mb} MB limit.")
 
-    # The signed offer letter is stricter: PDF/Word only, under 5 MB.
-    if docType == "Signed Offer Letter":
+    # Signed letters (offer / appointment) are stricter: PDF/Word only, under 5 MB.
+    if docType in ("Signed Offer Letter", "Signed Appointment Letter"):
         name = (file.filename or "").lower()
         allowed_types = {
             "application/pdf",

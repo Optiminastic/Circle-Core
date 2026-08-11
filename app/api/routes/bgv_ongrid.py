@@ -53,7 +53,8 @@ def _pick_doc_request(repo: DocumentRepository, candidate_id: str) -> dict[str, 
     requests = [
         r
         for r in repo.list(DOC_REQUESTS)
-        if r.get("candidateId") == candidate_id and r.get("kind") != "signed-offer"
+        if r.get("candidateId") == candidate_id
+        and r.get("kind") not in ("signed-offer", "signed-appointment")
     ]
     if not requests:
         return None
