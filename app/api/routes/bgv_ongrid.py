@@ -24,12 +24,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.repositories.base import DocumentRepository
-from app.services.ongrid import (
-    DOC_TYPE_ROUTING,
-    GENDER_TO_ONGRID,
-    OnGridClient,
-    OnGridError,
-)
+from app.services.ongrid import GENDER_TO_ONGRID, OnGridClient, OnGridError
 from app.storage.base import FileStorage
 
 router = APIRouter(prefix="/api/bgv", tags=["bgv"], dependencies=[Depends(require_user)])
@@ -140,8 +135,9 @@ def ongrid_onboard(
         if not meta:
             doc_results.append({"docType": doc_type, "status": "missing"})
             continue
-        # PAN/Voter route to their OCR endpoint; the rest attach as "other".
-        route = "extract" if doc_type in DOC_TYPE_ROUTING else "other"
+        # Every document type is attached as-is via /doc/other — OnGrid runs
+        # its own OCR later, so we don't route any type through /extract.
+        route = "other"
         try:
             data, content_type = storage.get(meta["storageKey"])
             client.upload_document(
