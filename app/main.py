@@ -20,6 +20,7 @@ from app.api.routes import (
     calendar,
     candidate_delete,
     candidate_handoff,
+    candidate_promote,
     doc_requests,
     documents,
     exit_handover,
@@ -234,6 +235,7 @@ def create_app() -> FastAPI:
     # DELETE /api/candidates/{id} cleans up related records (other methods fall
     # through to the generic router).
     app.include_router(candidate_delete.router)
+    app.include_router(candidate_promote.router)
     app.include_router(resources.router)
     return app
 
