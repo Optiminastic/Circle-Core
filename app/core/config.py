@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     # Always CC HR on recruitment correspondence (interview invites, the Physical
     # Interview pack, test invites/results, decisions). Blank disables it.
     hr_cc_email: str = "hr@optiminastic.com"
+    # Sender for early-pipeline candidate emails (OTP, application received, HR
+    # Call scheduling) — sent from a plain notification address, not CC'd to HR.
+    notification_from_email: str = "notification@optiminastic.com"
     # Resend HTTP API key (used INSTEAD of SMTP when set — Render free tier blocks
     # outbound SMTP). Auto-derived from the Resend SMTP password if not set.
     resend_api_key: str = ""

@@ -879,8 +879,10 @@ def send_custom_email(
     organizer_name: str | None = None,
     attendees: list[str] | None = None,
     event_uid: str | None = None,
+    no_cc: bool = False,
     links: list[dict[str, str]] | None = None,
     attachment: dict[str, Any] | None = None,
+    from_email: str | None = None,
 ) -> bool:
     """Send an HR-composed (and possibly edited) email, wrapped in the branded
     shell. When event details are supplied, a Google Calendar invite (.ics,
@@ -907,11 +909,12 @@ def send_custom_email(
 
         msg = EmailMessage()
         msg["Subject"] = subject
-        msg["From"] = f"{settings.smtp_from_name} <{settings.from_address}>"
+        msg["From"] = f"{settings.smtp_from_name} <{from_email or settings.from_address}>"
         if settings.smtp_reply_to.strip():
             msg["Reply-To"] = settings.smtp_reply_to.strip()
         msg["To"] = to
-        _add_hr_cc(settings, msg, to)
+        if not no_cc:
+            _add_hr_cc(settings, msg, to)
         msg.set_content(text_body)
         msg.add_alternative(_wrap_custom(inner), subtype="html")
 
@@ -968,13 +971,19 @@ def send_schedule_email(
     """Compose and deliver the schedule notification. Logs failures, never raises."""
     try:
         when_ist = _format_ist(date_time_iso)
+        # HR Call is the only round scheduled before the "Interview Schedule" stage
+        # — send it from the plain notification address, no HR CC. Every other
+        # round type (IQ Test / Assessment / Interview) keeps the normal sender.
+        pre_interview = schedule_type == "HR Call"
         msg = EmailMessage()
         msg["Subject"] = subject_for(schedule_type)
-        msg["From"] = f"{settings.smtp_from_name} <{settings.from_address}>"
+        sender = settings.notification_from_email if pre_interview else settings.from_address
+        msg["From"] = f"{settings.smtp_from_name} <{sender}>"
         if settings.smtp_reply_to.strip():
             msg["Reply-To"] = settings.smtp_reply_to.strip()
         msg["To"] = to
-        _add_hr_cc(settings, msg, to)
+        if not pre_interview:
+            _add_hr_cc(settings, msg, to)
         msg.set_content(
             _build_text(
                 schedule_type, candidate_name, when_ist,
@@ -1013,7 +1022,7 @@ def send_otp_email(settings: Settings, to: str, code: str) -> bool:
         )
         msg = EmailMessage()
         msg["Subject"] = "Your verification code"
-        msg["From"] = f"{settings.smtp_from_name} <{settings.from_address}>"
+        msg["From"] = f"{settings.smtp_from_name} <{settings.notification_from_email}>"
         if settings.smtp_reply_to.strip():
             msg["Reply-To"] = settings.smtp_reply_to.strip()
         msg["To"] = to
@@ -1046,7 +1055,12 @@ def send_application_received(
     """
     if override:
         return send_custom_email(
-            settings=settings, to=to, subject=override["subject"], body=override["body"]
+            settings=settings,
+            to=to,
+            subject=override["subject"],
+            body=override["body"],
+            no_cc=True,
+            from_email=settings.notification_from_email,
         )
     try:
         safe_name = html.escape(name.strip() or "there")
@@ -1062,7 +1076,7 @@ def send_application_received(
         )
         msg = EmailMessage()
         msg["Subject"] = f"We received your application — {role.strip() or 'your role'}"
-        msg["From"] = f"{settings.smtp_from_name} <{settings.from_address}>"
+        msg["From"] = f"{settings.smtp_from_name} <{settings.notification_from_email}>"
         if settings.smtp_reply_to.strip():
             msg["Reply-To"] = settings.smtp_reply_to.strip()
         msg["To"] = to
