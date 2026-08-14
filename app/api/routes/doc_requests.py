@@ -107,9 +107,12 @@ async def upload_request_document(
             raise ValidationError("File must be under 5 MB.")
 
     candidate_id = request.get("candidateId") or token
+    # Defaults to "candidate" — every request created before this field existed
+    # (and every existing candidate flow) has no entityType at all.
+    entity_type = request.get("entityType") or "candidate"
     doc_id = uuid.uuid4().hex[:12]
     filename = file.filename or "file"
-    key = f"documents/candidate/{candidate_id}/{doc_id}_{_safe_name(filename)}"
+    key = f"documents/{entity_type}/{candidate_id}/{doc_id}_{_safe_name(filename)}"
     storage.put(key, data, file.content_type or "application/octet-stream")
 
     now = datetime.now(timezone.utc).isoformat()
@@ -119,7 +122,7 @@ async def upload_request_document(
         doc_id,
         {
             "id": doc_id,
-            "entityType": "candidate",
+            "entityType": entity_type,
             "entityId": candidate_id,
             "category": docType,
             "fileName": filename,
