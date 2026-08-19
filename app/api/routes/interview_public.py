@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api/public", tags=["public-interview"])
 
 _SHEETS = "interview-sheets"
 _INTERVIEWS = "interviews"
+_KIT_SENDS = "interview-kit-sends"
 
 
 @router.get("/interview-sheet/{sheet_id}")
@@ -38,9 +39,6 @@ def submit_interview_feedback(
     service: ResourceService = Depends(get_resource_service),
 ) -> dict[str, Any]:
     sheet = service.get(get_resource(_SHEETS), sheet_id)  # validates the token
-    interview_id = sheet.get("interviewId")
-    if not interview_id:
-        raise HTTPException(status_code=400, detail="This sheet is not linked to an interview.")
     changes = {
         "questionResponses": payload.get("questionResponses"),
         "grading": payload.get("grading"),
@@ -48,4 +46,15 @@ def submit_interview_feedback(
     }
     # Only write fields the interviewer actually provided.
     changes = {key: value for key, value in changes.items() if value is not None}
-    return service.patch(get_resource(_INTERVIEWS), interview_id, changes)
+
+    # The write-back target is derived server-side from the unguessable sheet
+    # token — the interviewer never names it. A scheduled interview's sheet
+    # points at an interview record; a kit sent manually from Settings points at
+    # an `interview-kit-sends` record instead (no interview / pipeline change).
+    interview_id = sheet.get("interviewId")
+    if interview_id:
+        return service.patch(get_resource(_INTERVIEWS), interview_id, changes)
+    kit_send_id = sheet.get("kitSendId")
+    if kit_send_id:
+        return service.patch(get_resource(_KIT_SENDS), kit_send_id, changes)
+    raise HTTPException(status_code=400, detail="This sheet is not linked to a record.")
