@@ -40,6 +40,7 @@ from app.repositories.base import DocumentRepository
 from app.repositories.document_repository import SqlAlchemyDocumentRepository
 from app.services.email_sender import send_application_received, send_otp_email
 from app.services.email_templates import resolve as resolve_template
+from app.services import resume_keywords
 from app.services.screening import build_answers, compute_fit
 from app.storage.base import FileStorage
 
@@ -443,6 +444,14 @@ async def apply(
     answers = build_answers(questions, app_in.responses) if questions else []
     fit = compute_fit(answers) if answers else None
 
+    # 5b) Resume keyword match against the job's keyword list, if any — best
+    # effort (a scanned/image-only PDF yields no text, never blocks the
+    # application). Snapshot at apply time, same as `fit` above: doesn't
+    # retroactively change if HR edits the job's keywords later.
+    resume_text = resume_keywords.extract_text(data)
+    job_keywords = job.get("keywords") or []
+    keyword_matches = resume_keywords.match_keywords(resume_text, job_keywords) if job_keywords else []
+
     # 6) Persist the candidate. Role/department come from the JOB, status/source/
     #    date are fixed by the server — the applicant can't influence the pipeline.
     candidate = {
@@ -472,6 +481,12 @@ async def apply(
         "jobId": app_in.jobId,
         "screeningAnswers": answers or None,
         "fitRating": fit,
+        "resumeText": resume_text or None,
+        # Always a list (possibly empty) once this code path has run at all —
+        # the frontend tells "no score computed" (key absent, pre-feature
+        # applicant) apart from "computed, scored zero" by checking for
+        # undefined, not by emptiness. Never collapse [] to None here.
+        "keywordMatches": keyword_matches,
     }
     repo.upsert("candidates", candidate_id, candidate)
     logger.info("Public application stored: candidate=%s job=%s", candidate_id, app_in.jobId)
