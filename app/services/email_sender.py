@@ -44,13 +44,17 @@ def _addr_list(msg: EmailMessage, header: str) -> list[dict[str, str]]:
 
 
 def _add_hr_cc(settings: Settings, msg: EmailMessage, to: str) -> None:
-    """CC the HR mailbox on recruitment correspondence (candidate/interviewer
-    emails) so HR keeps a copy of every thread. Skipped when HR *is* the
-    recipient, or when no CC mailbox is configured. Both transports honour the Cc
-    header (Resend reads it; SMTP send_message adds it)."""
-    cc = (settings.hr_cc_email or "").strip()
-    if cc and cc.lower() != to.strip().lower() and "Cc" not in msg:
-        msg["Cc"] = cc
+    """CC the HR mailbox(es) on recruitment correspondence (candidate/interviewer
+    emails) so HR keeps a copy of every thread. `hr_cc_email` may be a single
+    address or a comma-separated list (e.g. "hr@x.com,hr2@x.com"). Each address
+    is skipped if it matches the recipient (never CC someone their own email);
+    skipped entirely when no CC mailbox is configured. Both transports honour
+    the Cc header (Resend reads it; SMTP send_message adds it)."""
+    to_lower = to.strip().lower()
+    addrs = [a.strip() for a in (settings.hr_cc_email or "").split(",") if a.strip()]
+    cc_addrs = [a for a in addrs if a.lower() != to_lower]
+    if cc_addrs and "Cc" not in msg:
+        msg["Cc"] = ", ".join(cc_addrs)
 
 
 def _deliver_resend(settings: Settings, msg: EmailMessage) -> None:

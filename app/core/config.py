@@ -65,8 +65,10 @@ class Settings(BaseSettings):
     # From address when unset.
     smtp_reply_to: str = "hr@optiminastic.com"
     # Always CC HR on recruitment correspondence (interview invites, the Physical
-    # Interview pack, test invites/results, decisions). Blank disables it.
-    hr_cc_email: str = "hr@optiminastic.com"
+    # Interview pack, test invites/results, decisions). Comma-separated for
+    # multiple mailboxes (e.g. "hr@optiminastic.com,hr2@optiminastic.com").
+    # Blank disables it.
+    hr_cc_email: str = "hr@optiminastic.com,hr2@optiminastic.com"
     # Sender for early-pipeline candidate emails (OTP, application received, HR
     # Call scheduling) — sent from a plain notification address, not CC'd to HR.
     notification_from_email: str = "notification@optiminastic.com"
