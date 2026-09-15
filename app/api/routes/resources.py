@@ -31,7 +31,7 @@ Document = dict[str, Any]
 _PUBLIC_LIST = {"jobs"}
 # Reads by id: public job detail (apply page) + unguessable-token reads
 # (candidate test + onboarding-doc pages).
-_PUBLIC_GET_BY_ID = {"jobs", "test-invites", "doc-requests"}
+_PUBLIC_GET_BY_ID = {"jobs", "test-invites", "doc-requests", "joining-confirmations"}
 # Writes: only the candidate's own onboarding bank details. Test-invite writes go
 # through the write-once /api/public/test/* endpoints instead of an arbitrary PATCH.
 _PUBLIC_PATCH_BY_ID = {"doc-requests"}

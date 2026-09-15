@@ -25,6 +25,7 @@ from app.api.routes import (
     documents,
     exit_handover,
     interview_public,
+    joining_confirmations,
     meta,
     notifications,
     public,
@@ -131,10 +132,14 @@ def create_app() -> FastAPI:
         link must not be scrapable at speed. Covers:
           - GET/PATCH /api/doc-requests/{token}  (details incl. bank acct; consent/
             bank/references saves).  NOT the /upload sub-path (POST, handled above).
+          - GET/PATCH /api/joining-confirmations/{token}  (candidate's joining-date
+            response + meal/plant preferences).
           - GET /api/documents/{id}/preview | /url  (document bytes / presigned URL).
         """
         if method == "GET" or method == "PATCH":
             if path.startswith("/api/doc-requests/") and not path.endswith("/upload"):
+                return True
+            if path.startswith("/api/joining-confirmations/"):
                 return True
         if method == "GET" and path.startswith("/api/documents/"):
             return path.endswith("/preview") or path.endswith("/url")
@@ -212,6 +217,7 @@ def create_app() -> FastAPI:
     # so their literal paths win over "/api/{resource}".
     app.include_router(documents.router)
     app.include_router(doc_requests.router)
+    app.include_router(joining_confirmations.router)
     app.include_router(bgv_ongrid.router)
     app.include_router(notifications.router)
     app.include_router(calendar.router)
