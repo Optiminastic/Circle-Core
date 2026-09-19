@@ -422,7 +422,15 @@ async def apply(
         raise ValidationError("Invalid application data.")
     try:
         app_in = ApplicationIn.model_validate(raw)
-    except PydanticValidationError:
+    except PydanticValidationError as exc:
+        # Log WHICH fields failed (names + rule only, never the submitted values,
+        # so nothing personal lands in the logs). Without this the generic public
+        # message below is undiagnosable — an applicant hits a dead end and there
+        # is no record of why.
+        fields = ", ".join(
+            f"{'.'.join(str(p) for p in err['loc'])}:{err['type']}" for err in exc.errors()
+        )
+        logger.warning("Application rejected for job %s — invalid fields: %s", raw.get("jobId"), fields)
         # Don't echo internals back to the public — generic message only.
         raise ValidationError("Some details are missing or invalid. Please review the form.")
 
