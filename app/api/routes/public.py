@@ -25,11 +25,18 @@ import re
 import secrets
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict, Field, ValidationError as PydanticValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError as PydanticValidationError,
+    field_validator,
+    model_validator,
+)
 
 from app.api.dependencies import get_database, get_repository, get_storage
 from app.core.config import Settings, get_settings
@@ -303,6 +310,15 @@ def otp_verify(
     return {"ok": True}
 
 
+# Where the applicant says they heard about the role. A CLOSED set, because the
+# value is written to the candidate's `sourceOfApplication` — an HR pipeline
+# field. Anything outside these four is rejected by the model, so an applicant
+# still cannot write arbitrary text into the pipeline. Mirrors
+# APPLICATION_SOURCES in fe/lib/api/public.ts — keep the two lists in step.
+ApplicationSource = Literal["Job Posting", "Careers", "Referral", "Other"]
+_REFERRAL_SOURCE = "Referral"
+
+
 class ApplicationIn(BaseModel):
     # Reject any field not declared here — blocks mass-assignment (e.g. trying to
     # smuggle status="Hired", a custom id, or a forged fitRating).
@@ -325,6 +341,11 @@ class ApplicationIn(BaseModel):
     # clients don't break; validated to the known set when present.
     gender: str = Field(default="", max_length=10)
     currentCompany: str = Field(default="", max_length=120)
+    # Defaulted so a client from before this field existed still applies cleanly
+    # (it lands on the same value the server used to hardcode).
+    source: ApplicationSource = "Job Posting"
+    # Required when `source` is "Referral" — enforced in _referral_needs_name below.
+    referredBy: str = Field(default="", max_length=120)
     resumeUrl: str = Field(default="", max_length=500)
     responses: dict[str, str] = Field(default_factory=dict)
 
@@ -365,6 +386,20 @@ class ApplicationIn(BaseModel):
             str(k)[:64]: str(val)[:_MAX_ANSWER_LEN]
             for k, val in list(v.items())[:_MAX_ANSWERS]
         }
+
+    @model_validator(mode="after")
+    def _referral_needs_name(self) -> "ApplicationIn":
+        """A referral must name the referrer; any other source must not carry one.
+
+        Dropping the name on the other sources keeps a stale value from a client
+        that hid the field without clearing it out of the stored record.
+        """
+        if self.source == _REFERRAL_SOURCE:
+            if not self.referredBy.strip():
+                raise ValueError("referredBy is required when source is Referral")
+        elif self.referredBy:
+            self.referredBy = ""
+        return self
 
 
 @router.post("/apply", status_code=201)
@@ -452,8 +487,9 @@ async def apply(
     job_keywords = job.get("keywords") or []
     keyword_matches = resume_keywords.match_keywords(resume_text, job_keywords) if job_keywords else []
 
-    # 6) Persist the candidate. Role/department come from the JOB, status/source/
-    #    date are fixed by the server — the applicant can't influence the pipeline.
+    # 6) Persist the candidate. Role/department come from the JOB, status/date are
+    #    fixed by the server. `source` is applicant-declared but constrained to the
+    #    ApplicationSource literal, so the pipeline field still can't take free text.
     candidate = {
         "id": candidate_id,
         "fullName": _clean(app_in.fullName),
@@ -472,8 +508,14 @@ async def apply(
         "linkedInUrl": app_in.linkedInUrl,
         "appliedRole": job.get("title", ""),
         "department": job.get("department", ""),
-        "sourceOfApplication": "Job Posting",
-        "referralDetails": f"Applied via public posting {app_in.jobId}",
+        "sourceOfApplication": app_in.source,
+        # HR reads this as the "Referral" row on the profile, so a referral shows
+        # the person's name; every other source keeps the provenance note.
+        "referralDetails": (
+            _clean(app_in.referredBy)
+            if app_in.source == _REFERRAL_SOURCE
+            else f"Applied via public posting {app_in.jobId}"
+        ),
         "hrRemarks": _clean(app_in.coverNote),
         "status": "New Application",
         "appliedDate": date.today().isoformat(),
