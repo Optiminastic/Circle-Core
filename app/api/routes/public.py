@@ -315,7 +315,7 @@ def otp_verify(
 # field. Anything outside these four is rejected by the model, so an applicant
 # still cannot write arbitrary text into the pipeline. Mirrors
 # APPLICATION_SOURCES in fe/lib/api/public.ts — keep the two lists in step.
-ApplicationSource = Literal["Job Posting", "Careers", "Referral", "Other"]
+ApplicationSource = Literal["LinkedIn", "Careers", "Referral", "Other"]
 _REFERRAL_SOURCE = "Referral"
 
 
@@ -341,9 +341,10 @@ class ApplicationIn(BaseModel):
     # clients don't break; validated to the known set when present.
     gender: str = Field(default="", max_length=10)
     currentCompany: str = Field(default="", max_length=120)
-    # Defaulted so a client from before this field existed still applies cleanly
-    # (it lands on the same value the server used to hardcode).
-    source: ApplicationSource = "Job Posting"
+    # Defaulted so a client from before this field existed still applies cleanly.
+    # "Other" rather than a real channel: such a client told us nothing, and
+    # guessing would quietly skew HR's source attribution.
+    source: ApplicationSource = "Other"
     # Required when `source` is "Referral" — enforced in _referral_needs_name below.
     referredBy: str = Field(default="", max_length=120)
     resumeUrl: str = Field(default="", max_length=500)
