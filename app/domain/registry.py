@@ -56,6 +56,10 @@ _DEFS: tuple[ResourceDef, ...] = (
     # so the link emailed to an interviewer stays short (instead of base64-encoding
     # the whole payload into the URL). Read by the public /interview-sheet page.
     ResourceDef("interview-sheets", "interview_sheets", "id"),
+    # Public, token-gated joining-date confirmation + welcome preferences
+    # (meal, plant) sent to a hired candidate. Created by HR, read/patched by
+    # the candidate via /api/joining-confirmations/*.
+    ResourceDef("joining-confirmations", "joining_confirmations", "id"),
 )
 
 RESOURCES: dict[str, ResourceDef] = {d.slug: d for d in _DEFS}
