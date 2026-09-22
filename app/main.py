@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -21,7 +21,6 @@ from app.api.routes import (
     candidate_delete,
     candidate_handoff,
     candidate_promote,
-    directory_export,
     doc_requests,
     documents,
     employee_codes,
@@ -34,6 +33,8 @@ from app.api.routes import (
     resources,
     test_public,
 )
+from app.api.dependencies import get_resource_service
+from app.services.resource_service import ResourceService
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
@@ -248,23 +249,29 @@ def create_app() -> FastAPI:
     app.include_router(candidate_delete.router)
     app.include_router(candidate_promote.router)
     app.include_router(employee_codes.router)
-    app.include_router(directory_export.router)
+    # Directory export for the shared identity service. Defined inline, and before
+    # the generic /api/{resource} router below, because on FastAPI 0.141 a route
+    # from a separately-imported module was not registered in time. Inlining on
+    # `app` here is immune to that import-timing issue and guarantees order.
+    from app.api.routes.directory_export import (
+        INTERNAL_SECRET_HEADER,
+        build_directory,
+        check_internal_secret,
+    )
+
+    @app.get("/api/directory/export", tags=["directory"])
+    def directory_export_route(
+        service: ResourceService = Depends(get_resource_service),
+        x_internal_secret: str | None = Header(default=None, alias=INTERNAL_SECRET_HEADER),
+    ) -> list[dict]:
+        check_internal_secret(x_internal_secret, settings.internal_api_secret)
+        return build_directory(service)
+
     app.include_router(resources.router)
     return app
 
 
 app = create_app()
-
-# Safety net for a FastAPI version difference (production runs 0.141, some dev
-# venvs 0.136): on 0.141 the employee-codes and directory-export routers can end
-# up unregistered when they are included inside create_app() at import time,
-# although both register fine on 0.136. Re-include any whose routes are missing,
-# now that the whole module and all its route decorators have loaded. Idempotent:
-# skipped when already present, so it adds nothing on 0.136 and no duplicates.
-_registered_paths = {r.path for r in app.routes if hasattr(r, "path")}
-for _late_router in (employee_codes.router, directory_export.router):
-    if not any(rt.path in _registered_paths for rt in _late_router.routes):
-        app.include_router(_late_router)
 
 
 if __name__ == "__main__":
