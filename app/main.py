@@ -255,6 +255,17 @@ def create_app() -> FastAPI:
 
 app = create_app()
 
+# Safety net for a FastAPI version difference (production runs 0.141, some dev
+# venvs 0.136): on 0.141 the employee-codes and directory-export routers can end
+# up unregistered when they are included inside create_app() at import time,
+# although both register fine on 0.136. Re-include any whose routes are missing,
+# now that the whole module and all its route decorators have loaded. Idempotent:
+# skipped when already present, so it adds nothing on 0.136 and no duplicates.
+_registered_paths = {r.path for r in app.routes if hasattr(r, "path")}
+for _late_router in (employee_codes.router, directory_export.router):
+    if not any(rt.path in _registered_paths for rt in _late_router.routes):
+        app.include_router(_late_router)
+
 
 if __name__ == "__main__":
     # Production entrypoint (e.g. Render): bind 0.0.0.0 on the platform-provided
