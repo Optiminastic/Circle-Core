@@ -38,6 +38,32 @@ _INDEX_DDL = (
     'CREATE INDEX IF NOT EXISTS "ix_{table}_data_gin" ON "{table}" USING GIN (data jsonb_path_ops)',
 )
 
+# Employee codes ("EMP-1042") are the primary key of the `employees` table, so they
+# must be unique. A sequence makes that true by construction; the previous
+# client-side `randomId('EMP', 9000, 1000)` picked a random number in 1000-9999 with
+# no uniqueness check, which silently overwrites an existing employee on collision
+# (~8% likely at 40 staff, a coin flip by ~110).
+_EMPLOYEE_CODE_SEQ = "employee_code_seq"
+_EMPLOYEE_CODE_SEQ_DDL = f'CREATE SEQUENCE IF NOT EXISTS "{_EMPLOYEE_CODE_SEQ}" AS bigint MINVALUE 1000 START 1000'
+
+# Advance the sequence past any code already issued by the old random scheme, so a
+# freshly created sequence cannot hand out a number that is already in use.
+# GREATEST(...) means this only ever moves forward — re-running it can never rewind
+# the sequence and reissue codes. Safe to run on every boot.
+_EMPLOYEE_CODE_SEQ_SYNC = f"""
+SELECT setval(
+    '{_EMPLOYEE_CODE_SEQ}',
+    GREATEST(
+        (SELECT last_value FROM "{_EMPLOYEE_CODE_SEQ}"),
+        COALESCE((SELECT MAX(substring(id from 5)::bigint)
+                    FROM employees
+                   WHERE id ~ '^EMP-[0-9]+$'), 0),
+        1000
+    ),
+    true
+)
+"""
+
 
 class Database:
     def __init__(self, settings: Settings) -> None:
@@ -118,3 +144,20 @@ class Database:
             logger.info("Ensured %d resource tables (with indexes) exist.", len(tables))
         except SQLAlchemyError as exc:
             logger.exception("Failed to ensure tables: %s", exc)
+
+    def ensure_employee_code_sequence(self) -> None:
+        """Create the employee-code sequence and fast-forward it past existing codes.
+
+        Must run after ensure_tables — the sync statement reads the `employees`
+        table. A failure here is logged, not raised: the app still serves reads,
+        and allocation surfaces the problem at the point of use instead.
+        """
+        if self._engine is None:
+            return
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(text(_EMPLOYEE_CODE_SEQ_DDL))
+                last = conn.execute(text(_EMPLOYEE_CODE_SEQ_SYNC)).scalar_one()
+            logger.info("Employee code sequence ready (next code will be EMP-%d).", last + 1)
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to ensure employee code sequence: %s", exc)

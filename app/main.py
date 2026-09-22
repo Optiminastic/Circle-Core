@@ -21,8 +21,10 @@ from app.api.routes import (
     candidate_delete,
     candidate_handoff,
     candidate_promote,
+    directory_export,
     doc_requests,
     documents,
+    employee_codes,
     exit_handover,
     interview_public,
     joining_confirmations,
@@ -53,6 +55,9 @@ def create_app() -> FastAPI:
         database.connect()
         if settings.auto_create_tables:
             database.ensure_tables([*all_tables(), "documents", "email_otps"])
+            # Must follow ensure_tables: the sync statement reads `employees` to
+            # fast-forward the sequence past codes the old random scheme issued.
+            database.ensure_employee_code_sequence()
             # Seed the default dashboard accounts (hashed) on a fresh DB. Existing
             # accounts are left as-is (legacy plaintext rows are upgraded to a hash
             # on their next successful login).
@@ -242,6 +247,8 @@ def create_app() -> FastAPI:
     # through to the generic router).
     app.include_router(candidate_delete.router)
     app.include_router(candidate_promote.router)
+    app.include_router(employee_codes.router)
+    app.include_router(directory_export.router)
     app.include_router(resources.router)
     return app
 

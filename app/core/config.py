@@ -128,6 +128,9 @@ class Settings(BaseSettings):
     # in the DB (never in env). See app/services/google_calendar.py.
     google_client_id: str = ""
     google_client_secret: str = ""
+    # Shared secret for /api/directory/export, called by the id-sync identity
+    # service. Unset means that endpoint answers 503, never an open door.
+    internal_api_secret: str = ""
     google_redirect_uri: str = "http://localhost:8000/api/calendar/oauth/callback"
     google_calendar_id: str = "primary"  # which calendar events are written to
     # Where the OAuth callback redirects the browser back to (the Settings page).
