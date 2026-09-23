@@ -350,6 +350,27 @@ class ApplicationIn(BaseModel):
     resumeUrl: str = Field(default="", max_length=500)
     responses: dict[str, str] = Field(default_factory=dict)
 
+    # CTC is captured in LPA (lakhs per annum), but the field is free text and
+    # applicants routinely type the full annual rupee figure -- "35000" meaning
+    # 3.5 LPA. Downstream code guesses at those (lib/utils.ts parseCtcLpa divides
+    # anything >= 1000 by 100000), and a wrong guess silently misprices someone.
+    # The browser clamps the input as it is typed; this is the actual gate, since
+    # a direct POST never touches that input.
+    @field_validator("currentCtc", "expectedCtc")
+    @classmethod
+    def _ctc_lpa(cls, v: str) -> str:
+        try:
+            n = float(v)
+        except ValueError:
+            raise ValueError("CTC must be a number in LPA, e.g. 3.45")
+        if n <= 0:
+            raise ValueError("CTC must be greater than zero")
+        if n > 99.99:
+            raise ValueError(
+                "CTC must be in LPA (max 99.99), not the full annual salary"
+            )
+        return v
+
     @field_validator("email")
     @classmethod
     def _email(cls, v: str) -> str:
