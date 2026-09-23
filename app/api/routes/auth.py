@@ -11,9 +11,11 @@ The `auth-users` resource is intentionally NOT reachable through the generic
 
 from __future__ import annotations
 
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request, Response
 
 from app.api.dependencies import get_resource_service, require_admin, require_user
 from app.core.config import Settings, get_settings
@@ -21,6 +23,7 @@ from app.core.errors import NotFoundError
 from app.core.logging import get_logger
 from app.domain.registry import get_resource
 from app.services.password import hash_password, looks_hashed, verify_password
+from app.services.email_sender import send_custom_email
 from app.services.resource_service import ResourceService
 from app.services.sessions import COOKIE_NAME, issue_session
 
@@ -40,6 +43,8 @@ def _public_user(account: dict[str, Any]) -> dict[str, Any]:
         "email": email,
         "role": account.get("role", "hr"),
         "name": account.get("name", ""),
+        "title": account.get("title", ""),
+        "phone": account.get("phone", ""),
     }
 
 
@@ -111,18 +116,63 @@ def me(
     response: Response,
     settings: Settings = Depends(get_settings),
     user: dict[str, Any] = Depends(require_user),
+    service: ResourceService = Depends(get_resource_service),
 ) -> dict[str, Any]:
     # `user` is the validated session payload (email/role/name). Sliding session:
     # refresh the cookie on each app load so an active user is never logged out
     # (the expiry window advances by session_ttl_hours from now).
+    try:
+        account = service.get(get_resource(_AUTH_USERS), str(user["email"]).strip().lower())
+    except NotFoundError:
+        account = {"email": user["email"], "role": user["role"], "name": user.get("name", "")}
+    profile = _public_user(account)
     _set_session_cookie(
         request,
         response,
         settings,
-        {"email": user["email"], "role": user["role"], "name": user.get("name", "")},
+        {"email": profile["email"], "role": profile["role"], "name": profile["name"]},
     )
-    return {"email": user["email"], "role": user["role"], "name": user.get("name", "")}
+    return profile
 
+
+_PROFILE_WRITABLE = ("name", "title", "phone")
+
+
+@router.patch("/me")
+def update_my_profile(
+    request: Request,
+    response: Response,
+    payload: dict[str, Any] = Body(...),
+    settings: Settings = Depends(get_settings),
+    user: dict[str, Any] = Depends(require_user),
+    service: ResourceService = Depends(get_resource_service),
+) -> dict[str, Any]:
+    """Let a signed-in user maintain their own profile.
+
+    Only the display fields: `role`, `email` and `password` are not writable
+    here, so this can never be used to self-promote to admin.
+    """
+    email = str(user["email"]).strip().lower()
+    changes = {k: str(payload[k]).strip() for k in _PROFILE_WRITABLE if k in payload}
+    if not changes:
+        raise HTTPException(status_code=400, detail="Nothing to update.")
+    if "name" in changes and not changes["name"]:
+        raise HTTPException(status_code=400, detail="Name cannot be empty.")
+    for field in ("name", "title", "phone"):
+        if len(changes.get(field, "")) > 120:
+            raise HTTPException(status_code=400, detail=f"{field.title()} is too long.")
+
+    updated = service.patch(get_resource(_AUTH_USERS), email, changes)
+    profile = _public_user(updated)
+    # Re-issue the session so the header picks the new name up immediately.
+    _set_session_cookie(
+        request,
+        response,
+        settings,
+        {"email": profile["email"], "role": profile["role"], "name": profile["name"]},
+    )
+    logger.info("Profile updated by %s.", email)
+    return profile
 
 # --- Admin: account management (all require an admin session) ------------------
 
@@ -248,3 +298,173 @@ def seed_admin_accounts(database: Any) -> None:
         logger.info("Seeded initial admin account %s.", email)
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------- invitations
+
+# How long a password-setup link stays usable.
+_SETUP_TTL_HOURS = 72
+_PASSWORD_MIN = 8
+
+
+def _setup_expiry() -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=_SETUP_TTL_HOURS)).isoformat()
+
+
+def _setup_is_live(account: dict[str, Any]) -> bool:
+    raw = str(account.get("setupTokenExpiresAt") or "")
+    if not raw:
+        return False
+    try:
+        expires = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) <= expires
+
+
+def _find_by_setup_token(service: ResourceService, token: str) -> dict[str, Any] | None:
+    """Locate the account holding this setup token.
+
+    Compared with `compare_digest` so a caller cannot time their way to a valid
+    token one character at a time.
+    """
+    if not token:
+        return None
+    for account in service.list(get_resource(_AUTH_USERS)):
+        stored = str(account.get("setupToken") or "")
+        if stored and secrets.compare_digest(stored, token):
+            return account
+    return None
+
+
+@router.post("/users/invite", status_code=201)
+def invite_user(
+    background_tasks: BackgroundTasks,
+    payload: dict[str, Any] = Body(...),
+    _admin: dict[str, Any] = Depends(require_admin),
+    service: ResourceService = Depends(get_resource_service),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Create (or re-invite) an account and email them a password-setup link.
+
+    The account is created with NO password, so it cannot be logged into until
+    the invitee sets one - nobody, including the admin who sent the invite, ever
+    knows their password. Re-inviting an existing user only refreshes the token;
+    it deliberately does not clear a password they have already set.
+    """
+    email = str(payload.get("email", "")).strip().lower()
+    name = str(payload.get("name", "")).strip()
+    role = payload.get("role", "hr")
+    app_origin = str(payload.get("appOrigin", "")).strip().rstrip("/")
+
+    if len(email) < EMAIL_MIN or "@" not in email:
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    if role not in ("admin", "hr"):
+        raise HTTPException(status_code=400, detail="Role must be 'admin' or 'hr'.")
+    if not app_origin.startswith("http"):
+        raise HTTPException(status_code=400, detail="A valid appOrigin is required to build the link.")
+
+    token = secrets.token_urlsafe(32)
+    invite = {"setupToken": token, "setupTokenExpiresAt": _setup_expiry()}
+
+    try:
+        service.get(get_resource(_AUTH_USERS), email)
+        changes = dict(invite)
+        if name:
+            changes["name"] = name
+        changes["role"] = role
+        account = service.patch(get_resource(_AUTH_USERS), email, changes)
+    except NotFoundError:
+        account = service.create(
+            get_resource(_AUTH_USERS),
+            {"id": email, "email": email, "role": role, "name": name, "password": "", **invite},
+        )
+
+    link = f"{app_origin}/set-password/{token}"
+    body = chr(10).join(
+        [
+            f"Hi{' ' + name if name else ''},",
+            "",
+            "An account has been created for you on Circle, the Optiminastic HR Operating System.",
+            "",
+            f"Use the link below to choose your password. It is valid for {_SETUP_TTL_HOURS} hours.",
+            "",
+            f"Your sign-in email is {email} - it is filled in for you on that page.",
+            "",
+            "If you were not expecting this you can ignore it; the account cannot be used "
+            "until a password is set.",
+        ]
+    )
+    background_tasks.add_task(
+        _send_invite_email, settings, email, body, link
+    )
+    logger.info("Password-setup invite issued for %s.", email)
+    return _public_user(account)
+
+
+def _send_invite_email(settings: Settings, to: str, body: str, link: str) -> None:
+    """Never raises - runs in a BackgroundTask."""
+    try:
+        send_custom_email(
+            settings,
+            to,
+            "Set up your Circle account",
+            body,
+            links=[{"label": "Choose your password", "url": link}],
+        )
+    except Exception:
+        logger.exception("Could not send the password-setup email to %s.", to)
+
+
+@router.get("/setup/{token}")
+def setup_details(
+    token: str,
+    service: ResourceService = Depends(get_resource_service),
+) -> dict[str, Any]:
+    """Public. Returns just enough to prefill the set-password page."""
+    account = _find_by_setup_token(service, token)
+    if account is None or not _setup_is_live(account):
+        raise HTTPException(status_code=404, detail="This link is invalid or has expired.")
+    return {
+        "email": account.get("email"),
+        "name": account.get("name", ""),
+        "title": account.get("title", ""),
+    }
+
+
+@router.post("/setup/{token}")
+def setup_complete(
+    token: str,
+    payload: dict[str, Any] = Body(...),
+    service: ResourceService = Depends(get_resource_service),
+) -> dict[str, bool]:
+    """Public. Sets the password and burns the token so the link is single-use."""
+    account = _find_by_setup_token(service, token)
+    if account is None or not _setup_is_live(account):
+        raise HTTPException(status_code=404, detail="This link is invalid or has expired.")
+
+    password = str(payload.get("password", ""))
+    if len(password) < _PASSWORD_MIN:
+        raise HTTPException(
+            status_code=400, detail=f"Password must be at least {_PASSWORD_MIN} characters."
+        )
+
+    changes: dict[str, Any] = {
+        "password": hash_password(password),
+        "setupToken": None,
+        "setupTokenExpiresAt": None,
+    }
+    # The invitee fills in their own profile while setting a password, so HR
+    # never has to guess someone's name or job title on their behalf.
+    for field in ("name", "title", "phone"):
+        if field in payload:
+            changes[field] = str(payload[field]).strip()[:120]
+    service.patch(
+        get_resource(_AUTH_USERS),
+        str(account.get("email") or account.get("id")),
+        changes,
+    )
+    logger.info("Password set via invite for %s.", account.get("email"))
+    return {"ok": True}
