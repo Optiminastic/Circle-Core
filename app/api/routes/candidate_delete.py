@@ -16,6 +16,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Response
 
 from app.api.dependencies import (
+    get_audit_service,
     get_google_calendar_service,
     get_repository,
     get_storage,
@@ -25,6 +26,7 @@ from app.api.routes.calendar import cleanup_calendar_events
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.repositories.base import DocumentRepository
+from app.services.audit_service import AuditService
 from app.services.google_calendar import GoogleCalendarService
 from app.storage.base import FileStorage
 
@@ -54,8 +56,14 @@ def delete_candidate(
     storage: FileStorage = Depends(get_storage),
     calendar: GoogleCalendarService = Depends(get_google_calendar_service),
     settings: Settings = Depends(get_settings),
+    user: dict = Depends(require_user),
+    audit: AuditService = Depends(get_audit_service),
 ) -> Response:
     removed = 0
+    # Capture the candidate's name before the cascade removes the record, so the
+    # audit entry reads "deleted candidate <name>" rather than a bare id.
+    existing = repo.get("candidates", candidate_id) or {}
+    candidate_label = existing.get("fullName") or existing.get("name") or candidate_id
     # Google Calendar app-event ids to remove (interview = the event itself + the
     # interviewer's +1h event; schedules = the round's event). Collected here as
     # rows are found, then cleaned up so nothing lingers on the HR / interviewer /
@@ -97,4 +105,13 @@ def delete_candidate(
     # Finally the candidate itself.
     repo.delete("candidates", candidate_id)
     logger.info("Cascade-deleted candidate %s (+%d related records).", candidate_id, removed)
+    audit.record(
+        actor=user,
+        action="candidate.deleted",
+        summary=f"Deleted candidate {candidate_label}",
+        entity_type="candidate",
+        entity_id=candidate_id,
+        entity_label=candidate_label,
+        metadata={"related_removed": removed},
+    )
     return Response(status_code=204)

@@ -17,11 +17,12 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request, Response
 
-from app.api.dependencies import get_resource_service, require_admin, require_user
+from app.api.dependencies import get_audit_service, get_resource_service, require_admin, require_user
 from app.core.config import Settings, get_settings
 from app.core.errors import NotFoundError
 from app.core.logging import get_logger
 from app.domain.registry import get_resource
+from app.services.audit_service import AuditService
 from app.services.password import hash_password, looks_hashed, verify_password
 from app.services.email_sender import send_custom_email
 from app.services.resource_service import ResourceService
@@ -76,6 +77,7 @@ def login(
     payload: dict[str, Any] = Body(...),
     settings: Settings = Depends(get_settings),
     service: ResourceService = Depends(get_resource_service),
+    audit: AuditService = Depends(get_audit_service),
 ) -> dict[str, Any]:
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
@@ -101,6 +103,14 @@ def login(
 
     user = _public_user(account)
     _set_session_cookie(request, response, settings, user)
+    audit.record(
+        actor=user,
+        action="auth.login",
+        summary=f"{user.get('name') or user['email']} signed in",
+        entity_type="account",
+        entity_id=user["email"],
+        entity_label=user.get("name") or user["email"],
+    )
     return user
 
 
@@ -189,6 +199,7 @@ def create_user(
     payload: dict[str, Any] = Body(...),
     _admin: dict[str, Any] = Depends(require_admin),
     service: ResourceService = Depends(get_resource_service),
+    audit: AuditService = Depends(get_audit_service),
 ) -> dict[str, Any]:
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
@@ -202,6 +213,15 @@ def create_user(
         raise HTTPException(status_code=400, detail="Role must be 'admin' or 'hr'.")
     doc = {"id": email, "email": email, "role": role, "name": name, "password": hash_password(password)}
     created = service.create(get_resource(_AUTH_USERS), doc)
+    audit.record(
+        actor=_admin,
+        action="user.created",
+        summary=f"Created {role} account {email}",
+        entity_type="account",
+        entity_id=email,
+        entity_label=name or email,
+        metadata={"role": role},
+    )
     return _public_user(created)
 
 
@@ -211,11 +231,21 @@ def change_password(
     payload: dict[str, Any] = Body(...),
     _admin: dict[str, Any] = Depends(require_admin),
     service: ResourceService = Depends(get_resource_service),
+    audit: AuditService = Depends(get_audit_service),
 ) -> dict[str, bool]:
     new_password = str(payload.get("password", ""))
     if len(new_password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
-    service.patch(get_resource(_AUTH_USERS), email.strip().lower(), {"password": hash_password(new_password)})
+    target = email.strip().lower()
+    service.patch(get_resource(_AUTH_USERS), target, {"password": hash_password(new_password)})
+    audit.record(
+        actor=_admin,
+        action="user.password_reset",
+        summary=f"Reset the password for {target}",
+        entity_type="account",
+        entity_id=target,
+        entity_label=target,
+    )
     return {"ok": True}
 
 
@@ -225,6 +255,7 @@ def change_email(
     payload: dict[str, Any] = Body(...),
     _admin: dict[str, Any] = Depends(require_admin),
     service: ResourceService = Depends(get_resource_service),
+    audit: AuditService = Depends(get_audit_service),
 ) -> dict[str, Any]:
     old = email.strip().lower()
     new = str(payload.get("newEmail", "")).strip().lower()
@@ -238,6 +269,15 @@ def change_email(
     moved = {**account, "id": new, "email": new}
     service.create(get_resource(_AUTH_USERS), moved)
     service.delete(get_resource(_AUTH_USERS), old)
+    audit.record(
+        actor=_admin,
+        action="user.email_changed",
+        summary=f"Changed account email {old} to {new}",
+        entity_type="account",
+        entity_id=new,
+        entity_label=new,
+        metadata={"from": old},
+    )
     return _public_user(moved)
 
 
@@ -246,8 +286,18 @@ def delete_user(
     email: str,
     _admin: dict[str, Any] = Depends(require_admin),
     service: ResourceService = Depends(get_resource_service),
+    audit: AuditService = Depends(get_audit_service),
 ) -> Response:
-    service.delete(get_resource(_AUTH_USERS), email.strip().lower())
+    target = email.strip().lower()
+    service.delete(get_resource(_AUTH_USERS), target)
+    audit.record(
+        actor=_admin,
+        action="user.deleted",
+        summary=f"Deleted account {target}",
+        entity_type="account",
+        entity_id=target,
+        entity_label=target,
+    )
     return Response(status_code=204)
 
 
@@ -346,6 +396,7 @@ def invite_user(
     _admin: dict[str, Any] = Depends(require_admin),
     service: ResourceService = Depends(get_resource_service),
     settings: Settings = Depends(get_settings),
+    audit: AuditService = Depends(get_audit_service),
 ) -> dict[str, Any]:
     """Create (or re-invite) an account and email them a password-setup link.
 
@@ -401,6 +452,15 @@ def invite_user(
         _send_invite_email, settings, email, body, link
     )
     logger.info("Password-setup invite issued for %s.", email)
+    audit.record(
+        actor=_admin,
+        action="user.invited",
+        summary=f"Invited {email} as {role}",
+        entity_type="account",
+        entity_id=email,
+        entity_label=name or email,
+        metadata={"role": role},
+    )
     return _public_user(account)
 
 

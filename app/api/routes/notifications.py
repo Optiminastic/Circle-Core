@@ -13,9 +13,10 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.api.dependencies import get_repository, require_user
+from app.api.dependencies import get_audit_service, get_repository, require_user
 from app.core.config import Settings, get_settings
 from app.repositories.base import DocumentRepository
+from app.services.audit_service import AuditService
 from app.services.email_sender import send_custom_email, send_schedule_email, send_test_email
 from app.services.email_templates import resolve as resolve_template
 
@@ -38,6 +39,8 @@ class ScheduleEmailIn(BaseModel):
 def schedule_email(
     payload: ScheduleEmailIn,
     settings: Settings = Depends(get_settings),
+    user: dict[str, Any] = Depends(require_user),
+    audit: AuditService = Depends(get_audit_service),
 ) -> dict[str, Any]:
     if not payload.to.strip():
         return {"sent": False, "reason": "no_recipient"}
@@ -52,6 +55,15 @@ def schedule_email(
         date_time_iso=payload.dateTimeIso,
         notes=payload.notes,
     )
+    if sent:
+        audit.record(
+            actor=user,
+            action="email.sent",
+            summary=f"Sent a {payload.type} email to {payload.candidateName}",
+            entity_type="email",
+            entity_label=payload.candidateName,
+            metadata={"kind": payload.type, "to": payload.to.strip()},
+        )
     return {"sent": sent} if sent else {"sent": False, "reason": "send_failed"}
 
 
@@ -73,11 +85,24 @@ def test_email(
     payload: TestEmailIn,
     settings: Settings = Depends(get_settings),
     repo: DocumentRepository = Depends(get_repository),
+    user: dict[str, Any] = Depends(require_user),
+    audit: AuditService = Depends(get_audit_service),
 ) -> dict[str, Any]:
     if not payload.to.strip():
         return {"sent": False, "reason": "no_recipient"}
     if not settings.has_smtp:
         return {"sent": False, "reason": "not_configured"}
+
+    def _log(sent: bool) -> None:
+        if sent:
+            audit.record(
+                actor=user,
+                action="email.sent",
+                summary=f"Sent a {payload.template} email to {payload.candidateName}",
+                entity_type="email",
+                entity_label=payload.candidateName,
+                metadata={"kind": payload.template, "to": payload.to.strip()},
+            )
 
     # If HR has saved an override for this template, send that instead. The body
     # is plain text, so it goes out through the same branded renderer as an
@@ -103,6 +128,7 @@ def test_email(
             subject=override["subject"],
             body=override["body"],
         )
+        _log(sent)
         return {"sent": sent} if sent else {"sent": False, "reason": "send_failed"}
 
     sent = send_test_email(
@@ -117,6 +143,7 @@ def test_email(
         date_time_iso=payload.dateTimeIso,
         salary=payload.salary,
     )
+    _log(sent)
     return {"sent": sent} if sent else {"sent": False, "reason": "send_failed"}
 
 
@@ -151,6 +178,8 @@ class CustomEmailIn(BaseModel):
 def custom_email(
     payload: CustomEmailIn,
     settings: Settings = Depends(get_settings),
+    user: dict[str, Any] = Depends(require_user),
+    audit: AuditService = Depends(get_audit_service),
 ) -> dict[str, Any]:
     """Send an HR-composed email (e.g. an interview invitation the HR edited),
     optionally with a Google Calendar invite attached.
@@ -189,4 +218,13 @@ def custom_email(
             else None
         ),
     )
+    if sent:
+        audit.record(
+            actor=user,
+            action="email.sent",
+            summary=f"Sent an email '{payload.subject}' to {payload.to.strip()}",
+            entity_type="email",
+            entity_label=payload.to.strip(),
+            metadata={"kind": "custom", "subject": payload.subject, "to": payload.to.strip()},
+        )
     return {"sent": sent} if sent else {"sent": False, "reason": "send_failed"}

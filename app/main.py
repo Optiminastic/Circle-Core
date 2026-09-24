@@ -15,6 +15,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes import (
+    audit,
     auth,
     bgv_ongrid,
     calendar,
@@ -55,7 +56,7 @@ def create_app() -> FastAPI:
         database = Database(settings)
         database.connect()
         if settings.auto_create_tables:
-            database.ensure_tables([*all_tables(), "documents", "email_otps"])
+            database.ensure_tables([*all_tables(), "documents", "email_otps", "audit_events"])
             # Must follow ensure_tables: the sync statement reads `employees` to
             # fast-forward the sequence past codes the old random scheme issued.
             database.ensure_employee_code_sequence()
@@ -229,6 +230,8 @@ def create_app() -> FastAPI:
     app.include_router(calendar.router)
     # Auth (login/logout/me + admin account mgmt) — its own /api/auth/* prefix.
     app.include_router(auth.router)
+    # Admin-only audit trail (/api/audit/*) — literal path, before the generic router.
+    app.include_router(audit.router)
     # Hardened public router must precede the generic resources router so its
     # literal /api/public/* paths win over "/api/{resource}".
     app.include_router(public.router)

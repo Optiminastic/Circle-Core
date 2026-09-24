@@ -11,9 +11,10 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
-from app.api.dependencies import get_resource_service
+from app.api.dependencies import current_user, get_audit_service, get_resource_service
 from app.core.config import Settings, get_settings
 from app.domain.registry import get_resource
+from app.services.audit_service import AuditService
 from app.services.resource_service import ResourceService
 from app.services.sessions import COOKIE_NAME, read_session
 
@@ -64,6 +65,99 @@ def guard_resources(request: Request, settings: Settings = Depends(get_settings)
 router = APIRouter(prefix="/api", tags=["resources"], dependencies=[Depends(guard_resources)])
 
 
+# --- Audit trail for key generic writes ---------------------------------------
+# Only a curated set of resources is audited, and only on create (a real
+# milestone, not a routine edit) plus candidate status changes - so the trail
+# reads as an HR "work report" instead of a firehose of every field edit.
+
+# resource slug -> (action key, summary verb) for CREATE.
+_CREATE_ACTIONS: dict[str, tuple[str, str]] = {
+    "candidates": ("candidate.created", "Added candidate"),
+    "employees": ("employee.created", "Onboarded employee"),
+    "offboarding": ("offboarding.started", "Started offboarding for"),
+}
+_ENTITY_TYPE: dict[str, str] = {
+    "candidates": "candidate",
+    "employees": "employee",
+    "offboarding": "employee",
+    "schedules": "schedule",
+}
+# Human-friendly label, best-effort, from the common name fields on a document.
+_LABEL_KEYS = ("fullName", "name", "candidateName", "employeeName", "title", "email")
+
+
+def _label(doc: Document) -> str:
+    for key in _LABEL_KEYS:
+        value = doc.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return str(doc.get("id") or "record")
+
+
+def _audit_create(audit: AuditService, user: dict[str, Any] | None, resource: str, doc: Document) -> None:
+    if resource == "schedules":
+        stype = doc.get("type") or "meeting"
+        who = doc.get("candidateName") or doc.get("candidateId") or "a candidate"
+        audit.record(
+            actor=user,
+            action="schedule.created",
+            summary=f"Scheduled {stype} for {who}",
+            entity_type="schedule",
+            entity_id=doc.get("id"),
+            entity_label=str(who),
+            metadata={"type": stype},
+        )
+        return
+    mapping = _CREATE_ACTIONS.get(resource)
+    if not mapping:
+        return
+    action, verb = mapping
+    label = _label(doc)
+    audit.record(
+        actor=user,
+        action=action,
+        summary=f"{verb} {label}",
+        entity_type=_ENTITY_TYPE.get(resource),
+        entity_id=doc.get("id") or doc.get("employeeId"),
+        entity_label=label,
+    )
+
+
+def _audit_patch(
+    audit: AuditService,
+    user: dict[str, Any] | None,
+    resource: str,
+    item_id: str,
+    changes: Document,
+    doc: Document,
+) -> None:
+    # Only candidate status transitions are meaningful "key actions"; every other
+    # patch is a routine edit and deliberately not logged.
+    if resource != "candidates" or "status" not in changes:
+        return
+    status = changes.get("status")
+    label = _label(doc)
+    if status == "Rejected":
+        audit.record(
+            actor=user,
+            action="candidate.rejected",
+            summary=f"Rejected candidate {label}",
+            entity_type="candidate",
+            entity_id=item_id,
+            entity_label=label,
+        )
+    else:
+        audit.record(
+            actor=user,
+            action="candidate.stage_changed",
+            summary=f"Moved candidate {label} to {status}",
+            entity_type="candidate",
+            entity_id=item_id,
+            entity_label=label,
+            metadata={"status": status},
+        )
+
+
 @router.get("/{resource}")
 def list_all(
     resource: str,
@@ -82,8 +176,16 @@ def get_one(resource: str, item_id: str, service: ResourceService = Depends(get_
 
 
 @router.post("/{resource}", status_code=201)
-def create(resource: str, payload: Document = Body(...), service: ResourceService = Depends(get_resource_service)) -> Document:
-    return service.create(get_resource(resource), payload)
+def create(
+    resource: str,
+    payload: Document = Body(...),
+    service: ResourceService = Depends(get_resource_service),
+    user: dict[str, Any] | None = Depends(current_user),
+    audit: AuditService = Depends(get_audit_service),
+) -> Document:
+    created = service.create(get_resource(resource), payload)
+    _audit_create(audit, user, resource, created)
+    return created
 
 
 @router.put("/{resource}/{item_id}")
@@ -92,8 +194,17 @@ def replace(resource: str, item_id: str, payload: Document = Body(...), service:
 
 
 @router.patch("/{resource}/{item_id}")
-def patch(resource: str, item_id: str, changes: Document = Body(...), service: ResourceService = Depends(get_resource_service)) -> Document:
-    return service.patch(get_resource(resource), item_id, changes)
+def patch(
+    resource: str,
+    item_id: str,
+    changes: Document = Body(...),
+    service: ResourceService = Depends(get_resource_service),
+    user: dict[str, Any] | None = Depends(current_user),
+    audit: AuditService = Depends(get_audit_service),
+) -> Document:
+    updated = service.patch(get_resource(resource), item_id, changes)
+    _audit_patch(audit, user, resource, item_id, changes, updated)
+    return updated
 
 
 @router.delete("/{resource}/{item_id}", status_code=204, response_class=Response)
