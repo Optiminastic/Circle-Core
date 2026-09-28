@@ -33,9 +33,18 @@ _PUBLIC_LIST = {"jobs"}
 # Reads by id: public job detail (apply page) + unguessable-token reads
 # (candidate test + onboarding-doc pages).
 _PUBLIC_GET_BY_ID = {"jobs", "test-invites", "doc-requests", "joining-confirmations"}
-# Writes: only the candidate's own onboarding bank details. Test-invite writes go
+# Writes: only the candidate's own onboarding details. Test-invite writes go
 # through the write-once /api/public/test/* endpoints instead of an arbitrary PATCH.
 _PUBLIC_PATCH_BY_ID = {"doc-requests"}
+# ...and only these keys. The doc-request id IS the token emailed to the
+# candidate, so without this an unauthenticated holder could PATCH
+# `submissions[].status = "Verified"` and approve their own identity documents -
+# which locks them against replacement (doc_requests.py) and is the gate on what
+# reaches OnGrid and the external onboarding export.
+# HR is unaffected: a request carrying a session skips this entirely.
+_PUBLIC_PATCH_FIELDS: dict[str, frozenset[str]] = {
+    "doc-requests": frozenset({"bankDetails", "consent", "references"}),
+}
 
 
 def _is_public_generic(method: str, resource: str, has_item_id: bool) -> bool:
@@ -202,9 +211,27 @@ def patch(
     user: dict[str, Any] | None = Depends(current_user),
     audit: AuditService = Depends(get_audit_service),
 ) -> Document:
+    if user is None:
+        _reject_non_public_fields(resource, changes)
     updated = service.patch(get_resource(resource), item_id, changes)
     _audit_patch(audit, user, resource, item_id, changes, updated)
     return updated
+
+
+def _reject_non_public_fields(resource: str, changes: Document) -> None:
+    """An unauthenticated PATCH may only touch the fields its own portal owns.
+
+    Anything else is a token holder reaching past their own form - most
+    importantly `submissions` and `status`, which decide whether a document
+    counts as verified.
+    """
+    allowed = _PUBLIC_PATCH_FIELDS.get(resource, frozenset())
+    forbidden = sorted(set(changes) - allowed)
+    if forbidden:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Not allowed to change: {', '.join(forbidden)}.",
+        )
 
 
 @router.delete("/{resource}/{item_id}", status_code=204, response_class=Response)

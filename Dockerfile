@@ -10,9 +10,17 @@ WORKDIR /app
 
 # curl is used by the container HEALTHCHECK. psycopg[binary] ships its own libpq
 # wheel, so no build toolchain is needed.
+# tesseract-ocr reads uploaded joining documents (see app/services/ocr.py). It's
+# a system binary, not a pip package; without it the app still runs and the
+# feature reports `ocr_not_configured`. Scanned PDFs are rasterised in-process
+# by pypdfium2, so no poppler is needed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl tesseract-ocr tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
+
+# Tesseract's OpenMP threading hurts throughput inside a multi-worker container
+# and would otherwise spread across every core of a shared host.
+ENV OMP_THREAD_LIMIT=1
 
 # Install dependencies first for better layer caching.
 COPY requirements.txt .

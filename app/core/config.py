@@ -153,6 +153,14 @@ class Settings(BaseSettings):
     # in again after this many hours of NO activity. Default 30 days.
     session_ttl_hours: int = 720
 
+    # --- Document OCR (app/services/ocr.py) ---
+    # Path to the Tesseract binary. Leave blank on Linux/Docker, where apt puts
+    # it on PATH. Windows installers do not update PATH for running processes,
+    # so set it explicitly there, e.g.
+    # OCR_TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+    # Unset and not on PATH = document parsing is simply skipped.
+    ocr_tesseract_cmd: str = ""
+
     # --- First-run admin seeding ---
     # Used ONLY to create the very first admin on an empty DB. Unset = seed nothing.
     # Never hardcode credentials in source; see auth.seed_admin_accounts.

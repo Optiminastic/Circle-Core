@@ -10,3 +10,6 @@ google-auth-oauthlib>=1.2
 google-api-python-client>=2.100
 cryptography>=42.0.0
 pypdf>=4.2
+pytesseract>=0.3.10
+Pillow>=10.3
+pypdfium2>=4.30
