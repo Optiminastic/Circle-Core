@@ -193,27 +193,45 @@ def _extract_on_upload(doc_type: str, data: bytes, content_type: str | None) -> 
         return None
 
 
+class SubmissionConfirmation(BaseModel):
+    """Values the candidate corrected, keyed the same as `extraction.fields`."""
+
+    fields: dict[str, str] | None = None
+
+
 @router.post("/{token}/submissions/{doc_type}/confirm")
 def confirm_submission(
     token: str,
     doc_type: str,
+    body: SubmissionConfirmation | None = None,
     repo: DocumentRepository = Depends(get_repository),
 ) -> dict[str, Any]:
-    """The candidate confirms the values we read off their own document.
+    """The candidate confirms the values we read off their own document, and
+    may correct the ones OCR could not confirm for itself.
 
-    Public and token-gated, like the upload it follows. It writes exactly one
-    timestamp and nothing else - in particular it can never set `status`.
-    Confirming is not verifying: HR still reviews every document, and a
-    candidate must not be able to approve their own identity papers.
+    Public and token-gated, like the upload it follows. It can never set
+    `status`: confirming is not verifying, HR still reviews every document, and
+    a candidate must not be able to approve their own identity papers.
+
+    Machine-validated fields (an Aadhaar number that satisfies its checksum, a
+    well-formed PAN) are NOT editable here - the whole value of those checks is
+    that the number came off the document rather than off a keyboard.
     """
     request = _load_request(repo, token)
     if _is_expired(request):
         raise ValidationError("This link has expired. Please ask HR for a new one.")
 
     submission = _find_submission(request, doc_type)
+    if submission.get("status") == "Verified":
+        raise ValidationError("This document has already been verified and locked.")
+
     extraction = submission.get("extraction")
     if not extraction:
         raise ValidationError("There is nothing to confirm for this document.")
+
+    if body and body.fields is not None:
+        extraction["fields"] = _apply_candidate_edits(extraction, body.fields)
+        extraction["editedByCandidate"] = True
 
     extraction["candidateConfirmedAt"] = datetime.now(timezone.utc).isoformat()
     request["updatedAt"] = extraction["candidateConfirmedAt"]
@@ -221,6 +239,20 @@ def confirm_submission(
 
     logger.info("Candidate confirmed '%s' for request %s.", doc_type, token)
     return submission
+
+
+def _apply_candidate_edits(
+    extraction: dict[str, Any], submitted: dict[str, str]
+) -> dict[str, str]:
+    """Merge the candidate's corrections over the extracted values, keeping any
+    machine-validated field exactly as it was read."""
+    protected = set(extraction.get("validatedFields") or ())
+    merged = dict(extraction.get("fields") or {})
+    for key, value in submitted.items():
+        if key in protected:
+            continue
+        merged[key] = value.strip()
+    return merged
 
 
 # --- HR-only: OCR extraction + review ----------------------------------------

@@ -68,6 +68,7 @@ def extract_bytes(data: bytes, content_type: str | None, doc_type: str) -> dict[
         warnings=fields.warnings,
         fields=fields.fields,
         confidence=result.mean_confidence,
+        validated_fields=fields.validated_fields,
     )
 
 
@@ -113,6 +114,7 @@ def _block(
     warnings: list[str],
     fields: dict[str, str] | None = None,
     confidence: float = 0.0,
+    validated_fields: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return {
         "engine": ENGINE,
@@ -121,4 +123,6 @@ def _block(
         "meanConfidence": round(confidence, 1),
         "fields": fields or {},
         "warnings": warnings,
+        # Fields a machine check confirmed; the rest a human may correct.
+        "validatedFields": list(validated_fields),
     }

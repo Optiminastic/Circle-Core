@@ -94,6 +94,10 @@ class FieldResult:
     fields: dict[str, str]
     warnings: list[str]
     validated: bool
+    # Keys a machine check confirmed (Aadhaar checksum, PAN format, a plausible
+    # pincode or year). Everything else is OCR's best guess and a human may
+    # correct it; these must not be editable, or the check means nothing.
+    validated_fields: tuple[str, ...] = ()
 
 
 # --- Aadhaar checksum ---------------------------------------------------------
@@ -264,7 +268,12 @@ def _extract_aadhaar(text: str) -> FieldResult:
     if name:
         fields["name"] = name
 
-    return FieldResult(fields=fields, warnings=warnings, validated=validated)
+    return FieldResult(
+        fields=fields,
+        warnings=warnings,
+        validated=validated,
+        validated_fields=("number",) if validated else (),
+    )
 
 
 def _extract_pan(text: str) -> FieldResult:
@@ -291,7 +300,12 @@ def _extract_pan(text: str) -> FieldResult:
     if dob:
         fields["dob"] = dob
 
-    return FieldResult(fields=fields, warnings=warnings, validated=validated)
+    return FieldResult(
+        fields=fields,
+        warnings=warnings,
+        validated=validated,
+        validated_fields=("number",) if validated else (),
+    )
 
 
 def _extract_address_proof(text: str) -> FieldResult:
@@ -315,7 +329,12 @@ def _extract_address_proof(text: str) -> FieldResult:
         fields["address"] = ", ".join(block)
         warnings.append("Address is a best-effort read - please check it against the image.")
 
-    return FieldResult(fields=fields, warnings=warnings, validated=validated)
+    return FieldResult(
+        fields=fields,
+        warnings=warnings,
+        validated=validated,
+        validated_fields=("pincode",) if validated else (),
+    )
 
 
 # How many lines above the pincode to treat as the address block.
@@ -358,7 +377,12 @@ def _extract_education(text: str) -> FieldResult:
         fields["degree"] = degree
 
     warnings.append("Certificate layouts vary - please check every field against the image.")
-    return FieldResult(fields=fields, warnings=warnings, validated=validated)
+    return FieldResult(
+        fields=fields,
+        warnings=warnings,
+        validated=validated,
+        validated_fields=("year",) if validated else (),
+    )
 
 
 def _match_hint(lines: list[str], patterns: tuple[re.Pattern[str], ...]) -> str:
