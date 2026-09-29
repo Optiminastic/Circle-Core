@@ -156,7 +156,13 @@ def ongrid_verify(
         return VerifyResult(ok=False, reason="not_onboarded")
 
     client = OnGridClient(settings)
-    document_ids: dict[str, str] = dict(bgv.get("ongridDocumentIds") or {})
+    # Document ids belong to one OnGrid individual. Re-onboarding creates a new
+    # one, and reusing ids across them fails with "Invalid document", so the
+    # cache is only good while the individual is unchanged.
+    cached_for = str(bgv.get("ongridDocumentIdsFor") or "")
+    document_ids: dict[str, str] = (
+        dict(bgv.get("ongridDocumentIds") or {}) if cached_for == individual_id else {}
+    )
 
     outcomes: list[dict[str, Any]] = []
     for code in body.services:
@@ -178,6 +184,7 @@ def ongrid_verify(
     bgv.setdefault("candidateId", candidate_id)
     bgv["services"] = body.services
     bgv["ongridDocumentIds"] = document_ids
+    bgv["ongridDocumentIdsFor"] = individual_id
     bgv["ongridChecks"] = outcomes
     if started:
         bgv["ongridVerificationsSentAt"] = _now()
