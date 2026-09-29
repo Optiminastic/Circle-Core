@@ -123,6 +123,47 @@ def _document_for(
     return data, content_type or meta.get("contentType"), meta.get("fileName") or doc_type
 
 
+def _portal_field(repo: DocumentRepository, candidate_id: str, key: str) -> Any:
+    """One value the candidate entered, from whichever of their document
+    requests holds it. Links get re-issued, so their answers end up spread
+    across several records and only one of them will have any given field."""
+    return next(
+        (
+            request[key]
+            for request in repo.list(DOC_REQUESTS)
+            if request.get("candidateId") == candidate_id and request.get(key)
+        ),
+        None,
+    )
+
+
+def _candidate_data(
+    repo: DocumentRepository, storage: FileStorage, candidate_id: str
+) -> bgv_checks.CandidateData:
+    """Everything the candidate supplied that a check might verify.
+
+    Gathered once per run rather than per check, so two checks wanting the same
+    file don't fetch it twice. Each field is independently optional - a check
+    reports for itself what it is missing.
+    """
+    uan = _portal_field(repo, candidate_id, "uan")
+    proofs = {
+        field_name: file
+        for doc_type, field_name in bgv_checks.EMPLOYMENT_PROOF_DOCS.items()
+        if (file := _document_for(repo, storage, candidate_id, doc_type)) is not None
+    }
+    return bgv_checks.CandidateData(
+        uan=str(uan).strip() if uan else None,
+        education=_portal_field(repo, candidate_id, "education"),
+        employment=_portal_field(repo, candidate_id, "employment"),
+        permanent_address=_portal_field(repo, candidate_id, "permanentAddress"),
+        education_file=_document_for(
+            repo, storage, candidate_id, bgv_checks.EDUCATION_DOC_TYPE
+        ),
+        employment_files=proofs,
+    )
+
+
 @router.post("/{candidate_id}/ongrid-verify", response_model=VerifyResult)
 def ongrid_verify(
     candidate_id: str,
@@ -155,15 +196,7 @@ def ongrid_verify(
         # The individual must exist before any check can reference it.
         return VerifyResult(ok=False, reason="not_onboarded")
 
-    # The UAN lives on whichever document request the candidate entered it in.
-    uan = next(
-        (
-            str(r.get("uan")).strip()
-            for r in repo.list(DOC_REQUESTS)
-            if r.get("candidateId") == candidate_id and r.get("uan")
-        ),
-        None,
-    )
+    data = _candidate_data(repo, storage, candidate_id)
 
     client = OnGridClient(settings)
     # Document ids belong to one OnGrid individual. Re-onboarding creates a new
@@ -181,7 +214,7 @@ def ongrid_verify(
             _document_for(repo, storage, candidate_id, requirement[0]) if requirement else None
         )
         outcome = bgv_checks.run_check(
-            client, individual_id, code, document, document_ids, uan=uan
+            client, individual_id, code, document, document_ids, data
         )
         outcomes.append(outcome.as_dict())
         logger.info(

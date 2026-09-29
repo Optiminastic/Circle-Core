@@ -43,7 +43,21 @@ _PUBLIC_PATCH_BY_ID = {"doc-requests"}
 # reaches OnGrid and the external onboarding export.
 # HR is unaffected: a request carrying a session skips this entirely.
 _PUBLIC_PATCH_FIELDS: dict[str, frozenset[str]] = {
-    "doc-requests": frozenset({"bankDetails", "consent", "references", "uan"}),
+    "doc-requests": frozenset(
+        {
+            "bankDetails",
+            "consent",
+            "references",
+            "uan",
+            # Claims the candidate makes about themselves, which background
+            # verification then confirms with the institute, the employer or a
+            # field agent. Safe for them to write precisely because nothing here
+            # is taken on trust - overstating a degree gets caught by EDUV.
+            "education",
+            "employment",
+            "permanentAddress",
+        }
+    ),
 }
 
 

@@ -36,6 +36,9 @@ from app.core.logging import get_logger
 
 logger = get_logger("curcle.ongrid")
 
+# One file part of a multipart upload: (filename, bytes, content type).
+UploadFile = tuple[str, bytes, str | None]
+
 _TIMEOUT = 30
 _HTTP_USER_AGENT = "Mozilla/5.0 (compatible; CurcleBackend/1.0; +https://optiminastic.com)"
 
@@ -150,9 +153,57 @@ class OnGridClient:
         These endpoints reject PDFs ("File Type not supported"), so the caller
         must pass an image.
         """
-        body, ctype = self._multipart(filename, data, content_type, {})
+        body, ctype = self._multipart({}, {"file": (filename, data, content_type)})
         path = f"/v1/individual/{individual_id}/doc/{slug}/extract"
         return self._request("POST", path, body=body, content_type=ctype)
+
+    # -- Records a check is run against ------------------------------------
+    # Three offerings verify a *record* rather than a document OnGrid reads for
+    # itself. The record carries the claim (this degree, this employer, this
+    # address); the check then confirms or refutes it. Each returns an `id` the
+    # matching check endpoint takes.
+
+    def add_education_document(
+        self, individual_id: str, fields: dict[str, str], file: UploadFile
+    ) -> dict[str, Any]:
+        """Register one qualification, certificate attached. Returns its `id`.
+
+        Unlike `/doc/{slug}/extract`, OnGrid does not read this document - the
+        values it verifies with the institute are the ones we send here, so the
+        certificate is evidence rather than the source. Accepts PDFs as well as
+        images, so the candidate's file goes up untouched.
+        """
+        body, ctype = self._multipart(fields, {"file": file})
+        path = f"/v1/individual/{individual_id}/doc/edu"
+        return self._request("POST", path, body=body, content_type=ctype)
+
+    def add_employment_record(
+        self, individual_id: str, fields: dict[str, str], files: dict[str, UploadFile]
+    ) -> dict[str, Any]:
+        """Register one past employment. Returns its `id`.
+
+        Proof documents are optional - the record stands on its fields alone,
+        and OnGrid contacts the employer from the manager/HR details on it.
+        """
+        body, ctype = self._multipart(fields, files)
+        path = f"/v1/individual/{individual_id}/doc/emprecord"
+        return self._request("POST", path, body=body, content_type=ctype)
+
+    def add_permanent_address(self, individual_id: str, address: dict[str, Any]) -> dict[str, Any]:
+        """Add the individual's permanent address. Returns its `id`.
+
+        Distinct from the current address set at onboarding, which is a plain
+        string on a different endpoint. PAV refuses a current address outright
+        ("PAV can only be requested against Permanent addresses"), so it has to
+        be this one.
+
+        `addOnly` is not optional in practice: without it the endpoint answers
+        "addressEntity cannot be null" whatever the body contains.
+        """
+        body = {"permanentAddress": address, "addOnly": True}
+        data = json.dumps(body).encode("utf-8")
+        path = f"/v1/individual/{individual_id}/permanentaddress"
+        return self._request("POST", path, body=data, content_type="application/json")
 
     def request_check(
         self, individual_id: str, code: str, payload: dict[str, Any]
@@ -172,25 +223,35 @@ class OnGridClient:
         return self._request("POST", path, body=data, content_type="application/json")
 
     def _multipart(
-        self, filename: str, data: bytes, content_type: str | None, fields: dict[str, str]
+        self, fields: dict[str, str], files: dict[str, UploadFile]
     ) -> tuple[bytes, str]:
-        """Encode `fields` + one `file` part as multipart/form-data."""
+        """Encode text fields and named file parts as multipart/form-data.
+
+        `files` is keyed by form field name because not every endpoint calls its
+        file part "file": an employment record carries `salaryslip`,
+        `appointmentletter` and `experienceletter` beside each other, and is
+        valid with none of them.
+        """
         boundary = f"----CurcleBoundary{uuid.uuid4().hex}"
-        ctype = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
         chunks: list[bytes] = []
         for name, value in fields.items():
             chunks.append(
                 f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
                 f"{value}\r\n".encode("utf-8")
             )
-        chunks.append(
-            (
-                f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
-                f'filename="{filename}"\r\nContent-Type: {ctype}\r\n\r\n'
-            ).encode("utf-8")
-        )
-        chunks.append(data)
-        chunks.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+        for name, (filename, data, content_type) in files.items():
+            ctype = (
+                content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            )
+            chunks.append(
+                (
+                    f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; '
+                    f'filename="{filename}"\r\nContent-Type: {ctype}\r\n\r\n'
+                ).encode("utf-8")
+            )
+            chunks.append(data)
+            chunks.append(b"\r\n")
+        chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
         return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
     def upload_document(
@@ -209,15 +270,10 @@ class OnGridClient:
         mode, slug = DOC_TYPE_ROUTING.get(doc_type, ("other", doc_type))
         if mode == "extract":
             path = f"/v1/individual/{individual_id}/doc/{slug}/extract"
-            body, ctype = self._multipart(filename, data, content_type, {})
+            body, ctype = self._multipart({}, {"file": (filename, data, content_type)})
         else:
             path = f"/v1/individual/{individual_id}/doc/other"
             body, ctype = self._multipart(
-                filename, data, content_type, {"documentName": doc_type}
+                {"documentName": doc_type}, {"file": (filename, data, content_type)}
             )
         return self._request("POST", path, body=body, content_type=ctype)
-
-
-def slug_for_doc_type(doc_type: str) -> str:
-    """OnGrid /doc slug for one of our joining-document types."""
-    return DOC_TYPE_TO_SLUG.get(doc_type, _FALLBACK_SLUG)
