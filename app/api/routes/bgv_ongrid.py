@@ -24,6 +24,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.repositories.base import DocumentRepository
+from app.services import bgv_checks
 from app.services.ongrid import GENDER_TO_ONGRID, OnGridClient, OnGridError
 from app.storage.base import FileStorage
 
@@ -70,6 +71,124 @@ class OnboardResult(BaseModel):
     documents: list[dict[str, Any]] = []
     response: dict[str, Any] | None = None
     reason: str | None = None
+
+
+class VerifyRequest(BaseModel):
+    """OfferingCodes HR chose, e.g. ["PANV", "EDUV"]."""
+
+    services: list[str] = []
+
+
+class VerifyResult(BaseModel):
+    ok: bool
+    individualId: str | None = None
+    checks: list[dict[str, Any]] = []
+    reason: str | None = None
+
+
+def _document_for(
+    repo: DocumentRepository,
+    storage: FileStorage,
+    candidate_id: str,
+    doc_type: str,
+) -> tuple[bytes, str | None, str] | None:
+    """The candidate's uploaded file for a document type, straight from storage.
+
+    Searches every document request for this candidate, not just one: links get
+    re-issued and a second request is often created for the documents the first
+    one missed, so a candidate's documents are routinely spread across several.
+    Prefers a verified submission, then the most recent.
+    """
+    submissions = [
+        s
+        for request in repo.list(DOC_REQUESTS)
+        if request.get("candidateId") == candidate_id
+        for s in request.get("submissions") or []
+        if s.get("docType") == doc_type
+    ]
+    if not submissions:
+        return None
+    submission = max(
+        submissions,
+        key=lambda s: (s.get("status") == "Verified", s.get("uploadedAt") or ""),
+    )
+    meta = repo.get(DOCUMENTS, submission.get("documentId"))
+    if not meta or not meta.get("storageKey"):
+        return None
+    try:
+        data, content_type = storage.get(meta["storageKey"])
+    except Exception:  # noqa: BLE001 - a storage blip shouldn't fail the batch
+        logger.exception("Could not fetch %s from storage.", doc_type)
+        return None
+    return data, content_type or meta.get("contentType"), meta.get("fileName") or doc_type
+
+
+@router.post("/{candidate_id}/ongrid-verify", response_model=VerifyResult)
+def ongrid_verify(
+    candidate_id: str,
+    body: VerifyRequest,
+    settings: Settings = Depends(get_settings),
+    repo: DocumentRepository = Depends(get_repository),
+    storage: FileStorage = Depends(get_storage),
+) -> VerifyResult:
+    """Actually run the background checks.
+
+    Each check has its own OnGrid endpoint and runs against a document
+    registered through `/doc/{slug}/extract` - OnGrid reads the identity number
+    off the document itself. Listing codes in a `verifications` array does
+    nothing, which is why onboarding alone never started anything.
+
+    Checks are independent: one failing (a missing document, an offering the
+    community isn't entitled to) must not stop the rest.
+    """
+    if not settings.has_ongrid:
+        return VerifyResult(ok=False, reason="not_configured")
+    if not body.services:
+        return VerifyResult(ok=False, reason="no_services")
+
+    if not repo.get(CANDIDATES, candidate_id):
+        raise NotFoundError("Candidate not found.")
+
+    bgv = repo.get(BGVS, candidate_id) or {}
+    individual_id = str(bgv.get("ongridIndividualId") or "")
+    if not individual_id:
+        # The individual must exist before any check can reference it.
+        return VerifyResult(ok=False, reason="not_onboarded")
+
+    client = OnGridClient(settings)
+    document_ids: dict[str, str] = dict(bgv.get("ongridDocumentIds") or {})
+
+    outcomes: list[dict[str, Any]] = []
+    for code in body.services:
+        requirement = bgv_checks.CHECK_REQUIREMENTS.get(code.upper())
+        document = (
+            _document_for(repo, storage, candidate_id, requirement[0]) if requirement else None
+        )
+        outcome = bgv_checks.run_check(client, individual_id, code, document, document_ids)
+        outcomes.append(outcome.as_dict())
+        logger.info(
+            "OnGrid check %s for candidate %s: %s",
+            code,
+            candidate_id,
+            "started" if outcome.ok else "not started",
+        )
+
+    started = [o["code"] for o in outcomes if o["ok"]]
+    bgv.setdefault("id", candidate_id)
+    bgv.setdefault("candidateId", candidate_id)
+    bgv["services"] = body.services
+    bgv["ongridDocumentIds"] = document_ids
+    bgv["ongridChecks"] = outcomes
+    if started:
+        bgv["ongridVerificationsSentAt"] = _now()
+        bgv.setdefault("verificationTimeline", []).append({
+            "date": _now(),
+            "action": f"Started {len(started)} OnGrid check(s): {', '.join(started)}",
+            "performedBy": "HR",
+        })
+    repo.upsert(BGVS, candidate_id, bgv)
+
+    return VerifyResult(ok=bool(started), individualId=individual_id, checks=outcomes)
 
 
 @router.post("/{candidate_id}/ongrid-onboard", response_model=OnboardResult)

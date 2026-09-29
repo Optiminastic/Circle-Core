@@ -131,6 +131,46 @@ class OnGridClient:
                 )
             raise
 
+    def upload_for_extract(
+        self,
+        individual_id: str,
+        slug: str,
+        filename: str,
+        data: bytes,
+        content_type: str | None,
+    ) -> dict[str, Any]:
+        """Register a document OnGrid can verify against, and let it read the
+        document's own number.
+
+        `/doc/{slug}/extract` is what makes a check possible: it returns a
+        document id, and OnGrid OCRs the identity number itself (a PAN card
+        comes back with `documentUID`). `/doc/other` merely stores a file, which
+        is why a check against it fails with "No PAN found to initiate PANV."
+
+        These endpoints reject PDFs ("File Type not supported"), so the caller
+        must pass an image.
+        """
+        body, ctype = self._multipart(filename, data, content_type, {})
+        path = f"/v1/individual/{individual_id}/doc/{slug}/extract"
+        return self._request("POST", path, body=body, content_type=ctype)
+
+    def request_check(
+        self, individual_id: str, code: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Start one background check.
+
+        Each offering has its own endpoint, named after the lowercased code -
+        `/v1/individual/{id}/panv`, `/empv`, and so on. Sending the codes in a
+        `verifications` array does nothing: `/individuals` silently discards
+        them and `/individuals/initiate` errors.
+
+        The body says which record to check, and the endpoint names what it
+        wants when it is missing ("Document Id can not be null").
+        """
+        path = f"/v1/individual/{individual_id}/{code.strip().lower()}"
+        data = json.dumps(payload).encode("utf-8")
+        return self._request("POST", path, body=data, content_type="application/json")
+
     def _multipart(
         self, filename: str, data: bytes, content_type: str | None, fields: dict[str, str]
     ) -> tuple[bytes, str]:
