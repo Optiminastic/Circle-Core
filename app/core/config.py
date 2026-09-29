@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     ongrid_username: str = ""
     ongrid_password: str = ""
     ongrid_community_id: str = ""
+    # The reference questionnaire PRC asks a referee. It is created by OnGrid
+    # inside the community and its id is not exposed by any API endpoint, so it
+    # has to be configured here - ask OnGrid for the id of your community's
+    # reference schema. Until it is set, PRC is the one check that cannot run;
+    # everything else is unaffected.
+    ongrid_prc_schema_id: int | None = None
 
     # Anti-spam rate limiting for the PUBLIC, unauthenticated writes (job
     # application: candidate create + resume upload). Limits are per client IP.

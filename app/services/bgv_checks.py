@@ -70,18 +70,14 @@ EMPLOYMENT_PROOF_DOCS: dict[str, str] = {
 # The document a qualification is registered with.
 EDUCATION_DOC_TYPE = "Education certificates"
 
-# Why a check can't be started from here. Shown to HR verbatim, so each says
-# what to do instead rather than just failing.
-UNAVAILABLE_CHECKS: dict[str, str] = {
-    "AV": (
-        "Aadhaar verification has no API endpoint - UIDAI requires the "
-        "candidate's OTP consent, so run it from the OnGrid portal."
-    ),
-    "PRC": (
-        "Reference check needs a reference schema selected in OnGrid, and the "
-        "schema ids are not exposed by the API - configure it in the portal."
-    ),
-}
+# Note on Aadhaar: there is no Aadhaar verification to run. OnGrid's ID
+# offerings are PANV, DLV (driving licence), PPV (passport) and VIDV (voter ID)
+# - no Aadhaar equivalent exists. `AV` is their *address* verification family
+# (with LAV, PAV, BAV, XAV), not "Aadhaar Verification", and
+# `/v1/individual/{id}/av` answers 404 because no such route exists. Circle's
+# catalogue carried an "AV - Aadhaar Card" entry that was never real.
+# We still collect and OCR the Aadhaar card; it is identity evidence for HR,
+# not something OnGrid can verify.
 
 # Rendered wide enough for OnGrid's OCR without sending a needlessly large file.
 _PDF_RENDER_DPI = 200
@@ -100,9 +96,13 @@ class CandidateData:
     education: Mapping[str, Any] | None = None
     employment: Mapping[str, Any] | None = None
     permanent_address: Mapping[str, Any] | None = None
+    references: list[Mapping[str, Any]] = field(default_factory=list)
     education_file: DocumentFile | None = None
     # Keyed by OnGrid form field name, per EMPLOYMENT_PROOF_DOCS.
     employment_files: dict[str, DocumentFile] = field(default_factory=dict)
+    # Community configuration rather than anything the candidate knows, but
+    # resolved in the same place and needed by the same call.
+    prc_schema_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -350,12 +350,43 @@ def _run_permanent_address(
     )
 
 
+def _run_reference(
+    client: OnGridClient, individual_id: str, code: str, data: CandidateData
+) -> CheckOutcome:
+    if data.prc_schema_id is None:
+        return _missing(
+            code,
+            "No reference questionnaire is configured. Ask OnGrid for your "
+            "community's reference schema id and set ONGRID_PRC_SCHEMA_ID.",
+        )
+    if not data.references:
+        return _missing(
+            code,
+            "No references on file - the candidate can add them in the "
+            "documents portal.",
+        )
+
+    # One referee per check, and one check per code, so the first complete
+    # reference is the one used. A second referee is a second PRC.
+    attempts = [bgv_records.reference(entry, data.prc_schema_id) for entry in data.references]
+    record = next((r for r in attempts if r.ok), None)
+    if record is None:
+        return _missing(
+            code, f"No reference is complete enough: {_list(attempts[0].missing)} missing."
+        )
+
+    return _start(client, individual_id, code, record.fields)
+
+
 ClaimRunner = Callable[[OnGridClient, str, str, CandidateData], CheckOutcome]
 
 CLAIM_CHECKS: dict[str, ClaimRunner] = {
     "EDUV": _run_education,
     "EMPV": _run_employment,
     "PAV": _run_permanent_address,
+    # PRC registers nothing first - the referee travels in the check body - but
+    # it is the same kind of claim, verified by contacting someone.
+    "PRC": _run_reference,
 }
 
 
@@ -378,8 +409,6 @@ def run_check(
     """
     upper = code.upper()
 
-    if upper in UNAVAILABLE_CHECKS:
-        return _missing(code, UNAVAILABLE_CHECKS[upper])
     if upper in UAN_CHECKS:
         return _run_uan_check(client, individual_id, code, data)
     if upper in SELF_CONTAINED_CHECKS:

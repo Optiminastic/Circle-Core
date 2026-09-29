@@ -138,7 +138,10 @@ def _portal_field(repo: DocumentRepository, candidate_id: str, key: str) -> Any:
 
 
 def _candidate_data(
-    repo: DocumentRepository, storage: FileStorage, candidate_id: str
+    repo: DocumentRepository,
+    storage: FileStorage,
+    candidate_id: str,
+    settings: Settings,
 ) -> bgv_checks.CandidateData:
     """Everything the candidate supplied that a check might verify.
 
@@ -157,10 +160,12 @@ def _candidate_data(
         education=_portal_field(repo, candidate_id, "education"),
         employment=_portal_field(repo, candidate_id, "employment"),
         permanent_address=_portal_field(repo, candidate_id, "permanentAddress"),
+        references=list(_portal_field(repo, candidate_id, "references") or []),
         education_file=_document_for(
             repo, storage, candidate_id, bgv_checks.EDUCATION_DOC_TYPE
         ),
         employment_files=proofs,
+        prc_schema_id=settings.ongrid_prc_schema_id,
     )
 
 
@@ -196,7 +201,7 @@ def ongrid_verify(
         # The individual must exist before any check can reference it.
         return VerifyResult(ok=False, reason="not_onboarded")
 
-    data = _candidate_data(repo, storage, candidate_id)
+    data = _candidate_data(repo, storage, candidate_id, settings)
 
     client = OnGridClient(settings)
     # Document ids belong to one OnGrid individual. Re-onboarding creates a new

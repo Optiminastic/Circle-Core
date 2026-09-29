@@ -45,6 +45,20 @@ EDUCATION_LEVELS: tuple[str, ...] = (
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DEFAULT_COUNTRY = "India"
 
+# OnGrid's `ReferenceType` enum has exactly two members - the API names them
+# when it rejects anything else. Circle asks the candidate a more useful
+# question ("how did they know you?"), so the answers fold onto the two here,
+# and whether they were the reporting manager is carried separately because
+# OnGrid keeps it as its own boolean.
+_REFERENCE_TYPES: dict[str, tuple[str, bool]] = {
+    "reporting manager": ("Professional", True),
+    "colleague": ("Professional", False),
+    "hr": ("Professional", False),
+    "academic referee": ("Academic", False),
+    "other": ("Professional", False),
+}
+_DEFAULT_REFERENCE_TYPE = ("Professional", False)
+
 
 @dataclass(frozen=True)
 class Record:
@@ -151,6 +165,41 @@ def employment(entry: Mapping[str, Any]) -> Record:
             ("hrPhone", _text(entry, "hrPhone"), None),
         ]
     )
+    return Record(fields=fields, missing=missing)
+
+
+def reference(entry: Mapping[str, Any], schema_id: int) -> Record:
+    """One referee, for `POST /prc`.
+
+    Unlike the other three, nothing is registered first - the referee travels in
+    the check's own body. `schemaId` is the questionnaire OnGrid will put to
+    them; it is community configuration rather than anything the candidate
+    knows, so the caller supplies it.
+
+    All six of OnGrid's mandatory fields come straight from the portal, which is
+    why the reference form asks for the referee's name and designation and not
+    just where they worked.
+    """
+    kind, reports_to = _REFERENCE_TYPES.get(
+        _text(entry, "referenceType").casefold(), _DEFAULT_REFERENCE_TYPE
+    )
+    fields, missing = _collect(
+        [
+            ("referenceProviderName", _text(entry, "name"), "the referee's name"),
+            ("referenceProviderEmail", _text(entry, "email"), "the referee's email"),
+            ("organisation", _text(entry, "organization"), "their organization"),
+            ("designation", _text(entry, "designation"), "their designation"),
+            ("referenceProviderPhone", _text(entry, "phone"), None),
+        ]
+    )
+    if missing:
+        return Record(fields=fields, missing=missing)
+
+    # Both are mandatory and neither can be blank, so they are set rather than
+    # collected - the lookup above always yields a value.
+    fields["referenceType"] = kind
+    fields["reportingManager"] = reports_to
+    fields["schemaId"] = schema_id
     return Record(fields=fields, missing=missing)
 
 
