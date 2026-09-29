@@ -42,6 +42,12 @@ CHECK_REQUIREMENTS: dict[str, tuple[str, str]] = {
 # Started with an empty body - OnGrid works from the profile it already has.
 SELF_CONTAINED_CHECKS: frozenset[str] = frozenset({"CCRV", "LAV"})
 
+# Employment history is verified against EPFO records rather than by contacting
+# employers, so the candidate's UAN is the whole input. It must be in the
+# request body: a UAN sitting on the individual's profile is not enough, and the
+# endpoint answers 500 rather than 400 when it is missing.
+UAN_CHECKS: frozenset[str] = frozenset({"EHC"})
+
 # Why a check can't be started from here. Shown to HR verbatim, so each says
 # what to do instead rather than just failing.
 UNAVAILABLE_CHECKS: dict[str, str] = {
@@ -69,9 +75,7 @@ UNAVAILABLE_CHECKS: dict[str, str] = {
         "Permanent address verification needs a permanent address on the "
         "OnGrid profile, which Circle does not send."
     ),
-    "EHC": (
-        "Employment history check is failing inside OnGrid - raise it with them."
-    ),
+
 }
 
 # Rendered wide enough for OnGrid's OCR without sending a needlessly large file.
@@ -123,6 +127,7 @@ def run_check(
     code: str,
     document: tuple[bytes, str | None, str] | None,
     document_ids: dict[str, str],
+    uan: str | None = None,
 ) -> CheckOutcome:
     """Register the document this check needs (once per document type), then
     start the check. `document_ids` caches ids across checks in one run."""
@@ -130,6 +135,19 @@ def run_check(
 
     if upper in UNAVAILABLE_CHECKS:
         return CheckOutcome(code=code, ok=False, reason=UNAVAILABLE_CHECKS[upper])
+
+    if upper in UAN_CHECKS:
+        if not uan:
+            return CheckOutcome(
+                code=code,
+                ok=False,
+                reason="No UAN on file - the candidate can add it in the documents portal.",
+            )
+        try:
+            result = client.request_check(individual_id, code, {"uans": [uan]})
+        except OnGridError as exc:
+            return CheckOutcome(code=code, ok=False, reason=str(exc))
+        return CheckOutcome(code=code, ok=True, requestId=str(result.get("requestId") or ""))
 
     # Nothing to attach: OnGrid runs these off the profile it already holds.
     if upper in SELF_CONTAINED_CHECKS:

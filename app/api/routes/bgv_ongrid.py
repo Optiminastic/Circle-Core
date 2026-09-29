@@ -155,6 +155,16 @@ def ongrid_verify(
         # The individual must exist before any check can reference it.
         return VerifyResult(ok=False, reason="not_onboarded")
 
+    # The UAN lives on whichever document request the candidate entered it in.
+    uan = next(
+        (
+            str(r.get("uan")).strip()
+            for r in repo.list(DOC_REQUESTS)
+            if r.get("candidateId") == candidate_id and r.get("uan")
+        ),
+        None,
+    )
+
     client = OnGridClient(settings)
     # Document ids belong to one OnGrid individual. Re-onboarding creates a new
     # one, and reusing ids across them fails with "Invalid document", so the
@@ -170,7 +180,9 @@ def ongrid_verify(
         document = (
             _document_for(repo, storage, candidate_id, requirement[0]) if requirement else None
         )
-        outcome = bgv_checks.run_check(client, individual_id, code, document, document_ids)
+        outcome = bgv_checks.run_check(
+            client, individual_id, code, document, document_ids, uan=uan
+        )
         outcomes.append(outcome.as_dict())
         logger.info(
             "OnGrid check %s for candidate %s: %s",

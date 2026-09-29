@@ -43,7 +43,7 @@ _PUBLIC_PATCH_BY_ID = {"doc-requests"}
 # reaches OnGrid and the external onboarding export.
 # HR is unaffected: a request carrying a session skips this entirely.
 _PUBLIC_PATCH_FIELDS: dict[str, frozenset[str]] = {
-    "doc-requests": frozenset({"bankDetails", "consent", "references"}),
+    "doc-requests": frozenset({"bankDetails", "consent", "references", "uan"}),
 }
 
 
