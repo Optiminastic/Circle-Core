@@ -73,10 +73,26 @@ class OnboardResult(BaseModel):
     reason: str | None = None
 
 
+class ClaimDetails(BaseModel):
+    """What HR entered for the checks that verify a stated claim.
+
+    The dialog pre-fills these from the candidate's own portal answers, so what
+    arrives here is usually theirs, reviewed. Anything present wins over the
+    stored copy: HR has just looked at it, and they are the ones accountable
+    for what gets sent.
+    """
+
+    uan: str | None = None
+    education: dict[str, Any] | None = None
+    employment: dict[str, Any] | None = None
+    permanentAddress: dict[str, Any] | None = None
+
+
 class VerifyRequest(BaseModel):
-    """OfferingCodes HR chose, e.g. ["PANV", "EDUV"]."""
+    """OfferingCodes HR chose, e.g. ["PANV", "EDUV"], and what they typed."""
 
     services: list[str] = []
+    details: ClaimDetails | None = None
 
 
 class VerifyResult(BaseModel):
@@ -142,6 +158,7 @@ def _candidate_data(
     storage: FileStorage,
     candidate_id: str,
     settings: Settings,
+    entered: ClaimDetails | None = None,
 ) -> bgv_checks.CandidateData:
     """Everything the candidate supplied that a check might verify.
 
@@ -149,17 +166,23 @@ def _candidate_data(
     file don't fetch it twice. Each field is independently optional - a check
     reports for itself what it is missing.
     """
-    uan = _portal_field(repo, candidate_id, "uan")
     proofs = {
         field_name: file
         for doc_type, field_name in bgv_checks.EMPLOYMENT_PROOF_DOCS.items()
         if (file := _document_for(repo, storage, candidate_id, doc_type)) is not None
     }
+
+    def claim(key: str) -> Any:
+        """What HR entered, falling back to what the candidate saved."""
+        typed = getattr(entered, key, None) if entered else None
+        return typed or _portal_field(repo, candidate_id, key)
+
+    uan = claim("uan")
     return bgv_checks.CandidateData(
         uan=str(uan).strip() if uan else None,
-        education=_portal_field(repo, candidate_id, "education"),
-        employment=_portal_field(repo, candidate_id, "employment"),
-        permanent_address=_portal_field(repo, candidate_id, "permanentAddress"),
+        education=claim("education"),
+        employment=claim("employment"),
+        permanent_address=claim("permanentAddress"),
         references=list(_portal_field(repo, candidate_id, "references") or []),
         education_file=_document_for(
             repo, storage, candidate_id, bgv_checks.EDUCATION_DOC_TYPE
@@ -201,7 +224,7 @@ def ongrid_verify(
         # The individual must exist before any check can reference it.
         return VerifyResult(ok=False, reason="not_onboarded")
 
-    data = _candidate_data(repo, storage, candidate_id, settings)
+    data = _candidate_data(repo, storage, candidate_id, settings, body.details)
 
     client = OnGridClient(settings)
     # Document ids belong to one OnGrid individual. Re-onboarding creates a new
@@ -233,6 +256,10 @@ def ongrid_verify(
     bgv.setdefault("id", candidate_id)
     bgv.setdefault("candidateId", candidate_id)
     bgv["services"] = body.services
+    if body.details:
+        # Kept so a re-run pre-fills with what was actually sent, and so the
+        # record shows what a check was run against rather than only its result.
+        bgv["claimDetails"] = body.details.model_dump(exclude_none=True)
     bgv["ongridDocumentIds"] = document_ids
     bgv["ongridDocumentIdsFor"] = individual_id
     bgv["ongridChecks"] = outcomes
