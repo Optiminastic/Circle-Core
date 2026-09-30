@@ -205,6 +205,26 @@ class OnGridClient:
         path = f"/v1/individual/{individual_id}/permanentaddress"
         return self._request("POST", path, body=data, content_type="application/json")
 
+    def verification_status(self, individual_id: str) -> dict[str, Any]:
+        """Every check's state for one individual.
+
+        This is the only honest source for what is running: Circle's own record
+        says what HR asked for, which is not the same thing - checks selected
+        before the per-offering endpoints existed were saved there but never
+        reached OnGrid.
+
+        `?includeReport=true` is not used. It makes the same call generate the
+        consolidated report, which on staging fails the whole request with a 500
+        (their report lambda is not callable), taking the status down with it.
+        The report is fetched separately so one being unavailable cannot hide
+        the other.
+        """
+        return self._request("GET", f"/v1/individual/{individual_id}/verificationstatus")
+
+    def consolidated_report(self, individual_id: str) -> dict[str, Any]:
+        """The report PDF's serving URL. Raises until every check has finished."""
+        return self._request("GET", f"/v1/individual/{individual_id}/report")
+
     def request_check(
         self, individual_id: str, code: str, payload: dict[str, Any]
     ) -> dict[str, Any]:

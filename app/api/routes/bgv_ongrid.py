@@ -192,6 +192,71 @@ def _candidate_data(
     )
 
 
+class StatusResult(BaseModel):
+    ok: bool
+    individualId: str | None = None
+    overallStatus: str | None = None
+    """One row per check OnGrid is actually running, with its own state."""
+    checks: list[dict[str, str]] = []
+    reportUrl: str | None = None
+    reason: str | None = None
+
+
+@router.get("/{candidate_id}/ongrid-status", response_model=StatusResult)
+def ongrid_status(
+    candidate_id: str,
+    settings: Settings = Depends(get_settings),
+    repo: DocumentRepository = Depends(get_repository),
+) -> StatusResult:
+    """What OnGrid is actually running for this candidate, and the report if ready.
+
+    Deliberately read from OnGrid rather than from our own record. The two are
+    not the same: `services` says what HR asked for, and checks selected before
+    the per-offering endpoints existed were saved there but never started, so
+    the stored list has claimed verifications that do not exist.
+    """
+    if not settings.has_ongrid:
+        return StatusResult(ok=False, reason="not_configured")
+
+    bgv = repo.get(BGVS, candidate_id) or {}
+    individual_id = str(bgv.get("ongridIndividualId") or "")
+    if not individual_id:
+        return StatusResult(ok=False, reason="not_onboarded")
+
+    client = OnGridClient(settings)
+    try:
+        payload = client.verification_status(individual_id)
+    except OnGridError as exc:
+        logger.warning("OnGrid status failed for candidate %s: %s", candidate_id, exc)
+        return StatusResult(ok=False, individualId=individual_id, reason=str(exc))
+
+    overall, checks = bgv_checks.parse_status(payload)
+
+    # Best-effort: the report only exists once every check has finished, and
+    # asking early is an error rather than an empty answer. A missing report
+    # must not turn a perfectly good status into a failure.
+    report = payload.get("consolidatedReportUrl")
+    if not report and checks:
+        try:
+            report = client.consolidated_report(individual_id).get("servingUrl")
+        except OnGridError:
+            report = None
+
+    # Cached so the panel has something to show before this call returns, and
+    # so the record keeps the last known state if OnGrid is unreachable.
+    bgv["ongridStatus"] = {"overall": overall, "checks": checks, "reportUrl": report}
+    bgv["ongridStatusAt"] = _now()
+    repo.upsert(BGVS, candidate_id, bgv)
+
+    return StatusResult(
+        ok=True,
+        individualId=individual_id,
+        overallStatus=overall,
+        checks=checks,
+        reportUrl=str(report) if report else None,
+    )
+
+
 @router.post("/{candidate_id}/ongrid-verify", response_model=VerifyResult)
 def ongrid_verify(
     candidate_id: str,

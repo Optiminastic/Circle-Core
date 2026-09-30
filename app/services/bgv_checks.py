@@ -31,6 +31,7 @@ code takes and starts it.
 from __future__ import annotations
 
 import io
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -142,6 +143,31 @@ def to_image(data: bytes, content_type: str | None, file_name: str | None) -> tu
     buffer = io.BytesIO()
     page.convert("RGB").save(buffer, format="JPEG", quality=_JPEG_QUALITY)
     return buffer.getvalue(), "image/jpeg"
+
+
+# OnGrid reports one `overall{CODE}Status` per offering the platform supports,
+# and NOT_REQUESTED for every one this community never asked for - which is most
+# of them, so they are dropped rather than shown as rows that mean nothing.
+NOT_REQUESTED = "NOT_REQUESTED"
+_STATUS_KEY = re.compile(r"^overall([A-Z0-9]+)Status$")
+
+
+def parse_status(payload: Mapping[str, Any]) -> tuple[str | None, list[dict[str, str]]]:
+    """OnGrid's status blob as (overall, one row per started check).
+
+    The states themselves are passed through rather than mapped onto our own
+    vocabulary: OnGrid owns what they mean, and inventing a translation here
+    would be guessing at values we have not seen.
+    """
+    started: list[dict[str, str]] = []
+    for key, value in payload.items():
+        match = _STATUS_KEY.match(key)
+        if not match or not value or value == NOT_REQUESTED:
+            continue
+        started.append({"code": match.group(1), "status": str(value)})
+    started.sort(key=lambda row: row["code"])
+    overall = payload.get("overallStatus")
+    return (str(overall) if overall else None), started
 
 
 def _missing(code: str, reason: str) -> CheckOutcome:
