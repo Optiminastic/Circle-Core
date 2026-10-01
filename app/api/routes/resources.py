@@ -56,6 +56,9 @@ _PUBLIC_PATCH_FIELDS: dict[str, frozenset[str]] = {
             "education",
             "employment",
             "permanentAddress",
+            # "I have never been employed before." Theirs to state, and it only
+            # ever removes checks from the run - it cannot cause one to pass.
+            "isFresher",
         }
     ),
 }

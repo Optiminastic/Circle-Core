@@ -98,6 +98,9 @@ class CandidateData:
     employment: Mapping[str, Any] | None = None
     permanent_address: Mapping[str, Any] | None = None
     references: list[Mapping[str, Any]] = field(default_factory=list)
+    # The candidate says they have never been employed. EHC and EMPV then have
+    # nothing to read, and saying so beats reporting their inputs as missing.
+    is_fresher: bool = False
     education_file: DocumentFile | None = None
     # Keyed by OnGrid form field name, per EMPLOYMENT_PROOF_DOCS.
     employment_files: dict[str, DocumentFile] = field(default_factory=dict)
@@ -217,7 +220,11 @@ def _run_uan_check(
 ) -> CheckOutcome:
     if not data.uan:
         return _missing(
-            code, "No UAN on file - the candidate can add it in the documents portal."
+            code,
+            "The candidate states this is their first job, so EPFO holds no "
+            "employment history to check."
+            if data.is_fresher
+            else "No UAN on file - the candidate can add it in the documents portal.",
         )
     return _start(client, individual_id, code, {"uans": [data.uan]})
 
@@ -304,8 +311,11 @@ def _run_employment(
     if not data.employment:
         return _missing(
             code,
-            "No previous employment on file - the candidate can add it in the "
-            "documents portal.",
+            "The candidate states this is their first job, so there is no "
+            "previous employer to contact."
+            if data.is_fresher
+            else "No previous employment on file - the candidate can add it in "
+            "the documents portal.",
         )
 
     record = bgv_records.employment(data.employment)

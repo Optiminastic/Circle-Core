@@ -184,6 +184,7 @@ def _candidate_data(
         employment=claim("employment"),
         permanent_address=claim("permanentAddress"),
         references=list(_portal_field(repo, candidate_id, "references") or []),
+        is_fresher=bool(_portal_field(repo, candidate_id, "isFresher")),
         education_file=_document_for(
             repo, storage, candidate_id, bgv_checks.EDUCATION_DOC_TYPE
         ),
