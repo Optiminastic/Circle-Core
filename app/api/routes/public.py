@@ -328,9 +328,14 @@ class ApplicationIn(BaseModel):
     fullName: str = Field(min_length=1, max_length=120)
     email: str = Field(min_length=3, max_length=254)
     phone: str = Field(min_length=10, max_length=10)
-    currentDesignation: str = Field(min_length=1, max_length=120)
-    currentCtc: str = Field(min_length=1, max_length=40)
-    expectedCtc: str = Field(min_length=1, max_length=40)
+    # Allowed empty here, required below unless the posting says it does
+    # not ask about current employment. The rule depends on the job, which
+    # the schema cannot see - and the job is read from our own records, so
+    # a client cannot talk its way out of the questions by claiming an
+    # internship.
+    currentDesignation: str = Field(default="", max_length=120)
+    currentCtc: str = Field(default="", max_length=40)
+    expectedCtc: str = Field(default="", max_length=40)
     totalExperienceYears: float = Field(ge=0, le=60)
     noticePeriodDays: int = Field(ge=0, le=3650)
     linkedInUrl: str = Field(min_length=1, max_length=300)
@@ -461,6 +466,18 @@ async def apply(
         raise ValidationError("This opening could not be found.")
     if job.get("status") != "Open":
         raise ValidationError("Applications for this opening are closed.")
+
+    # 2a) Current-employment answers are required unless this posting waives
+    # them. An internship, or any role open to people with no work history, has
+    # applicants with no current title, no CTC and no notice to serve; asking
+    # either turns them away or collects numbers they invented. Absent on jobs
+    # posted before the option existed, which kept asking.
+    if job.get("asksEmploymentDetails", True) and not (
+        app_in.currentDesignation.strip()
+        and app_in.currentCtc.strip()
+        and app_in.expectedCtc.strip()
+    ):
+        raise ValidationError("Some details are missing or invalid. Please review the form.")
 
     # 2b) The email must have been verified via OTP on this device/session.
     if not _email_is_verified(repo, app_in.email):
