@@ -52,6 +52,11 @@ _DEFS: tuple[ResourceDef, ...] = (
     ResourceDef("interview-banks", "interview_banks", "id"),
     ResourceDef("screening-banks", "screening_banks", "id"),
     ResourceDef("iq-bank", "iq_bank", "id"),
+    # Take-home assignment files HR can reuse per role, instead of uploading a
+    # fresh file every time they send a take-home invite (see TestInvite kind
+    # 'take-home'). The uploaded file itself lives in the generic documents
+    # store; this just maps role -> document.
+    ResourceDef("assignment-banks", "assignment_banks", "id"),
     # Interviewer feedback sheet payloads — stored under a short unguessable token
     # so the link emailed to an interviewer stays short (instead of base64-encoding
     # the whole payload into the URL). Read by the public /interview-sheet page.
