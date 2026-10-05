@@ -48,7 +48,7 @@ from app.repositories.document_repository import SqlAlchemyDocumentRepository
 from app.services.email_sender import send_application_received, send_otp_email
 from app.services.email_templates import resolve as resolve_template
 from app.services import resume_keywords
-from app.services.screening import build_answers, compute_fit
+from app.services.screening import build_answers, build_extra_answers, compute_fit, missing_required_extra
 from app.storage.base import FileStorage
 
 # These public, login-less endpoints are protected by abuse controls, not a
@@ -354,6 +354,9 @@ class ApplicationIn(BaseModel):
     referredBy: str = Field(default="", max_length=120)
     resumeUrl: str = Field(default="", max_length=500)
     responses: dict[str, str] = Field(default_factory=dict)
+    # Answers to the job's extra application questions (see ApplicationIn
+    # "extra" section below) — purely informational, never scored.
+    extraResponses: dict[str, str] = Field(default_factory=dict)
 
     # CTC is captured in LPA (lakhs per annum), but the field is free text and
     # applicants routinely type the full annual rupee figure -- "35000" meaning
@@ -404,7 +407,7 @@ class ApplicationIn(BaseModel):
             raise ValueError("invalid Google Drive URL")
         return v
 
-    @field_validator("responses")
+    @field_validator("responses", "extraResponses")
     @classmethod
     def _responses(cls, v: dict[str, str]) -> dict[str, str]:
         if len(v) > _MAX_ANSWERS:
@@ -480,6 +483,14 @@ async def apply(
     ):
         raise ValidationError("Some details are missing or invalid. Please review the form.")
 
+    # 2a-ii) Extra application questions marked `required` must be answered —
+    # same rule the frontend enforces, re-checked here since a direct POST
+    # never touches that form. Only relevant when the posting has them enabled.
+    if job.get("extraQuestionsEnabled") and missing_required_extra(
+        job.get("extraQuestions") or [], app_in.extraResponses
+    ):
+        raise ValidationError("Please answer all the required questions.")
+
     # 2b) The email must have been verified via OTP on this device/session.
     if not _email_is_verified(repo, app_in.email):
         raise ValidationError("Please verify your email before applying.")
@@ -527,6 +538,11 @@ async def apply(
     answers = build_answers(questions, app_in.responses) if questions else []
     fit = compute_fit(answers) if answers else None
 
+    # 5a) Snapshot extra-question answers — purely informational, never scored
+    # and never feeds `fit` above.
+    extra_questions = job.get("extraQuestions") or [] if job.get("extraQuestionsEnabled") else []
+    extra_answers = build_extra_answers(extra_questions, app_in.extraResponses) if extra_questions else []
+
     # 5b) Resume keyword match against the job's keyword list, if any — best
     # effort (a scanned/image-only PDF yields no text, never blocks the
     # application). Snapshot at apply time, same as `fit` above: doesn't
@@ -570,6 +586,7 @@ async def apply(
         "appliedAt": datetime.now(timezone.utc).isoformat(),
         "jobId": app_in.jobId,
         "screeningAnswers": answers or None,
+        "extraAnswers": extra_answers or None,
         "fitRating": fit,
         "resumeText": resume_text or None,
         # Always a list (possibly empty) once this code path has run at all —
