@@ -131,9 +131,12 @@ def create_app() -> FastAPI:
     public_write_paths = {"/api/public/apply", "/api/candidates", "/api/documents", "/api/auth/login"}
 
     def _is_public_upload(path: str) -> bool:
-        """Public, token-gated file-upload endpoints (onboarding + exit handover)."""
-        return (path.startswith("/api/exit-handovers/portal/") and path.endswith("/upload")) or (
-            path.startswith("/api/doc-requests/") and path.endswith("/upload")
+        """Public, token-gated file-upload endpoints (onboarding, exit handover,
+        take-home assignment submission)."""
+        return (
+            (path.startswith("/api/exit-handovers/portal/") and path.endswith("/upload"))
+            or (path.startswith("/api/doc-requests/") and path.endswith("/upload"))
+            or (path.startswith("/api/public/test/") and path.endswith("/submit-file"))
         )
 
     def _is_public_credential(path: str) -> bool:
