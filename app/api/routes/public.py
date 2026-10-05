@@ -467,12 +467,13 @@ async def apply(
     if job.get("status") != "Open":
         raise ValidationError("Applications for this opening are closed.")
 
-    # 2a) Current-employment answers are required unless this posting waives
-    # them. An internship, or any role open to people with no work history, has
-    # applicants with no current title, no CTC and no notice to serve; asking
-    # either turns them away or collects numbers they invented. Absent on jobs
-    # posted before the option existed, which kept asking.
-    if job.get("asksEmploymentDetails", True) and not (
+    # 2a) Current-employment answers are required unless this is an
+    # internship — an intern has no current title, no CTC and no notice to
+    # serve; requiring them either turns applicants away or collects numbers
+    # they invented. Derived purely from the posting's employment type (the
+    # frontend's apply form and job-posting editor derive it the same way —
+    # no separate stored flag to drift out of sync with).
+    if job.get("employmentType") != "Internship" and not (
         app_in.currentDesignation.strip()
         and app_in.currentCtc.strip()
         and app_in.expectedCtc.strip()
