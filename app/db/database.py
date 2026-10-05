@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings
 from app.core.errors import RepositoryError
 from app.core.logging import get_logger
+from app.repositories import identity_outbox_repository as identity_outbox
 
 logger = get_logger("curcle.db")
 
@@ -161,3 +162,15 @@ class Database:
             logger.info("Employee code sequence ready (next code will be EMP-%d).", last + 1)
         except SQLAlchemyError as exc:
             logger.exception("Failed to ensure employee code sequence: %s", exc)
+
+    def ensure_identity_outbox(self) -> None:
+        """Create the id-sync push outbox. Logged, not raised, like the others: the
+        app still serves HR without it, and enqueueing reports the failure."""
+        if self._engine is None:
+            return
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(text(identity_outbox.TABLE_DDL))
+                conn.execute(text(identity_outbox.INDEX_DDL))
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to ensure identity outbox: %s", exc)

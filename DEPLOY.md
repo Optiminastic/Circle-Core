@@ -35,6 +35,7 @@ Set in `.env`:
 - `POSTGRES_PASSWORD=<strong>` and `DATABASE_URL=postgresql+psycopg://circle:<strong>@db:5432/circle`
 - `PROXY_NETWORK=<network from step 1>`
 - `CORS_ORIGINS`, `FRONTEND_URL`, `GOOGLE_*` (no trailing `\n` in the secret!), `AWS_*`, `SMTP_*`.
+- id-sync push (optional, see below): `IDSYNC_PUSH_URL`.
 
 ## 3. Build & start (Postgres + API; nothing published)
 ```bash
@@ -78,3 +79,26 @@ Then load the Vercel frontend and confirm data + Question Library.
 - **DB backup (you own it now):**
   `docker compose exec -T db pg_dump -U circle circle | gzip > /opt/backups/circle-$(date +%F).sql.gz`
 - Remove: `docker compose down`, delete the Caddy block, reload Caddy.
+
+## id-sync push
+Every employee create/edit/delete in Circle is queued in the `identity_outbox` table and pushed to id-sync by a background loop in the API.
+id-sync updates the shared directory and passes the change on to Keycloak and Avora (each only if id-sync has them configured).
+- `IDSYNC_PUSH_URL=http://172.18.0.1:8017/directory/employees/push`
+- Signed with the existing `INTERNAL_API_SECRET`, which must equal id-sync's `CIRCLE_INTERNAL_SECRET` (already true if id-sync can read `/api/directory/export`).
+- Only the directory entry is sent (code, name, email, designation, department, status), exactly what `/api/directory/export` serves.
+- Deleting an employee sends `removed: true`; id-sync marks them departed and never deletes the identity.
+- If id-sync is down, rows retry with backoff; id-sync's scheduled pull also repairs anything missed.
+
+Check stuck deliveries:
+`docker compose exec -T db psql -U circle circle -c "SELECT employee_id, attempts, last_error, next_attempt_at FROM identity_outbox ORDER BY attempts DESC"`
+
+## Avora: pay, bank details and documents
+Avora's backend reads one employee at a time from `/api/internal/avora/*`, looked up by work email.
+- Set `AVORA_API_SECRET` here and the same value as `CIRCLE_API_SECRET` in Avora.
+- It is deliberately a different secret from `INTERNAL_API_SECRET` (which id-sync holds).
+- Avora decides who sees what: pay only for HR/admin/payroll, documents only for HR/admin and the person.
+- Profile photos are never sent; a document is only served for the employee it belongs to.
+
+## Document links
+`/api/documents/{id}/preview` and `/url` open without a login only for resumes, exit-handover files and profile/welcome photos.
+Everything else (ID proofs, letters, BGV reports) needs a dashboard session.

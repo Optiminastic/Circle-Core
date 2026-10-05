@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from app.domain.registry import get_resource
+from app.services.directory_entry import to_directory_entry
 from app.services.resource_service import ResourceService
 
 INTERNAL_SECRET_HEADER = "X-Internal-Secret"
@@ -40,22 +41,7 @@ def check_internal_secret(provided: str | None, expected: str) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid internal secret.")
 
 
-def _entry(doc: dict[str, Any]) -> dict[str, Any] | None:
-    email = (doc.get("email") or "").strip().lower()
-    code = (doc.get("id") or "").strip()  # Circle keys employees by their EMP-#### code
-    if not email or not code:
-        return None
-    return {
-        "employee_code": code,
-        "name": doc.get("fullName") or email,
-        "email": email,
-        "designation": doc.get("role") or None,   # Circle's "role" is the job title
-        "department": doc.get("department") or None,
-        "status": doc.get("status") or None,      # Active | On Leave | Suspended | Offboarded
-    }
-
-
 def build_directory(service: ResourceService) -> list[dict[str, Any]]:
     """The full employee roster, minimal safe fields only."""
     docs = service.list(get_resource("employees"))
-    return [e for doc in docs if (e := _entry(doc)) is not None]
+    return [e for doc in docs if (e := to_directory_entry(doc)) is not None]

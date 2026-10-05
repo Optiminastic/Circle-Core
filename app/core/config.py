@@ -149,6 +149,17 @@ class Settings(BaseSettings):
     # feed disabled (returns 404).
     candidate_feed_token: str = ""
 
+    # Push every employee change to id-sync (the shared identity service) as it
+    # happens: POST <url>, signed with internal_api_secret, the same secret
+    # id-sync uses to read /api/directory/export. Empty URL = push disabled.
+    # e.g. http://172.18.0.1:8017/directory/employees/push on the shared VPS.
+    idsync_push_url: str = ""
+    # Shared secret Avora presents to read ONE employee's pay, bank details and
+    # documents (/api/internal/avora/*). Deliberately separate from
+    # internal_api_secret, which id-sync holds. Empty = endpoints answer 503.
+    avora_api_secret: str = ""
+    identity_sync_interval_seconds: int = 15
+
     # --- Auth / dashboard sessions ---
     # Secret used to sign the httpOnly session cookie. Set SESSION_SECRET in prod
     # for a stable dedicated key; otherwise it falls back to an existing secret
@@ -235,6 +246,10 @@ class Settings(BaseSettings):
     @property
     def has_google(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret)
+
+    @property
+    def has_identity_sync(self) -> bool:
+        return bool(self.idsync_push_url.strip() and self.internal_api_secret.strip())
 
     @property
     def has_candidate_feed(self) -> bool:

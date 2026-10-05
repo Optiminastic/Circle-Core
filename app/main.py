@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from app.api.routes import (
     audit,
     auth,
+    avora_internal,
     bgv_ongrid,
     calendar,
     candidate_delete,
@@ -42,6 +43,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.rate_limit import SlidingWindowRateLimiter, client_ip, is_exempt_origin
 from app.db.database import Database
 from app.domain.registry import all_tables
+from app.services.identity_sync_worker import IdentitySyncWorker
 from app.storage.s3_storage import S3FileStorage
 
 logger = get_logger("curcle.main")
@@ -64,7 +66,15 @@ def create_app() -> FastAPI:
             # accounts are left as-is (legacy plaintext rows are upgraded to a hash
             # on their next successful login).
             auth.seed_admin_accounts(database)
+            database.ensure_identity_outbox()
         app.state.database = database
+
+        identity_sync: IdentitySyncWorker | None = None
+        if settings.has_identity_sync and database.is_ready:
+            identity_sync = IdentitySyncWorker(database, settings)
+            identity_sync.start()
+        else:
+            logger.info("id-sync push disabled (IDSYNC_PUSH_URL / INTERNAL_API_SECRET unset).")
 
         if settings.has_storage:
             app.state.storage = S3FileStorage(settings)
@@ -77,6 +87,8 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            if identity_sync is not None:
+                await identity_sync.stop()
             database.dispose()
 
     app = FastAPI(
@@ -252,6 +264,9 @@ def create_app() -> FastAPI:
     app.include_router(candidate_delete.router)
     app.include_router(candidate_promote.router)
     app.include_router(employee_codes.router)
+    # Server-to-server pay/bank/documents for Avora (own secret). Literal
+    # /api/internal/avora/* paths, before the generic /api/{resource} router.
+    app.include_router(avora_internal.router)
     # Directory export for the shared identity service. Defined inline, and before
     # the generic /api/{resource} router below, because on FastAPI 0.141 a route
     # from a separately-imported module was not registered in time. Inlining on
