@@ -364,9 +364,18 @@ class ApplicationIn(BaseModel):
     # anything >= 1000 by 100000), and a wrong guess silently misprices someone.
     # The browser clamps the input as it is typed; this is the actual gate, since
     # a direct POST never touches that input.
+    #
+    # Blank is allowed through here unchanged -- an internship (or any role that
+    # waives employment details, see "employmentType != Internship" below) never
+    # collects this field at all, so the browser submits "". Whether blank is
+    # actually acceptable for THIS job is enforced separately, after the job is
+    # loaded; a field validator fires before that and has no access to the job,
+    # so it can only ever check the value's FORMAT when one is given.
     @field_validator("currentCtc", "expectedCtc")
     @classmethod
     def _ctc_lpa(cls, v: str) -> str:
+        if not v:
+            return v
         try:
             n = float(v)
         except ValueError:
