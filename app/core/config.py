@@ -98,6 +98,26 @@ class Settings(BaseSettings):
     # everything else is unaffected.
     ongrid_prc_schema_id: int | None = None
 
+    # AI screening calls via Vapi (app/services/vapi.py). HR starts a call and
+    # Vapi reports back to /api/vapi/webhook. The private key places phone
+    # calls; Vapi only accepts the public key for browser test calls
+    # (/call/web). Empty phone number id = phone mode off, web tests still work.
+    vapi_api_key: str = ""
+    vapi_public_key: str = ""
+    vapi_base_url: str = "https://api.vapi.ai"
+    vapi_phone_number_id: str = ""
+    vapi_webhook_secret: str = ""
+    vapi_llm_provider: str = "openai"
+    vapi_llm_model: str = "gpt-4o-mini"
+    # Public URL Vapi posts call events to, e.g.
+    # https://api.circle.optiminastic.com/api/vapi/webhook
+    vapi_webhook_url: str = ""
+    # Sarvam speech bridge (voice_bridge/): Vapi streams call audio there and
+    # presents voice_bridge_secret as a bearer token, so the bridge is not open
+    # to the internet. The bridge holds the same value.
+    voice_bridge_url: str = ""
+    voice_bridge_secret: str = ""
+
     # Anti-spam rate limiting for the PUBLIC, unauthenticated writes (job
     # application: candidate create + resume upload). Limits are per client IP.
     # The HR app origin and local/LAN origins are exempt (see rate_limit.py), so
@@ -264,6 +284,23 @@ class Settings(BaseSettings):
         return bool(
             self.ongrid_username and self.ongrid_password and self.ongrid_community_id
         )
+
+    @property
+    def has_vapi(self) -> bool:
+        """Browser test calls work: keys, webhook secret and speech bridge set."""
+        return bool(
+            self.vapi_api_key.strip()
+            and self.vapi_public_key.strip()
+            and self.vapi_webhook_secret.strip()
+            and self.vapi_webhook_url.strip()
+            and self.voice_bridge_url.strip()
+            and self.voice_bridge_secret.strip()
+        )
+
+    @property
+    def has_vapi_phone(self) -> bool:
+        """Real phone calls also need the Vobiz number registered in Vapi."""
+        return self.has_vapi and bool(self.vapi_phone_number_id.strip())
 
 
 @lru_cache
