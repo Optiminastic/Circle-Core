@@ -104,3 +104,24 @@ Files still on the employee's original candidate record (e.g. signed offer/appoi
 ## Document links
 `/api/documents/{id}/preview` and `/url` open without a login only for resumes, exit-handover files and profile/welcome photos.
 Everything else (ID proofs, letters, BGV reports) needs a dashboard session.
+
+## AI screening calls (Vapi + Sarvam)
+HR starts a call from the candidate page; Vapi runs it and posts the result to `/api/vapi/webhook`.
+Speech goes through the `voice-bridge` container (Sarvam speech-to-text and text-to-speech).
+
+1. In `.env` set `VAPI_API_KEY` (private), `VAPI_PUBLIC_KEY`, `VAPI_WEBHOOK_SECRET`, `VAPI_WEBHOOK_URL=https://api.circle.optiminastic.com/api/vapi/webhook`, `VOICE_BRIDGE_URL=https://voice.circle.optiminastic.com`, `VOICE_BRIDGE_SECRET` and `SARVAM_API_KEY`.
+   Generate both secrets with `openssl rand -hex 32`.
+2. Add a site block to avora's Caddyfile and reload Caddy (as in step 5):
+```
+voice.circle.optiminastic.com {
+    reverse_proxy circle-voice-bridge:8080
+}
+```
+3. Point a `voice.circle.optiminastic.com` A-record at the VPS IP.
+4. `docker compose up -d --build`, then `curl -fsS https://voice.circle.optiminastic.com/health` should show `"configured":true`.
+5. Phone calls also need `VAPI_PHONE_NUMBER_ID`: the Vobiz number imported into Vapi as a BYO SIP trunk number.
+   Without it, only "Test in browser" calls work.
+
+Optional bridge settings: `SARVAM_STT_MODEL` (default `saaras:v3`), `SARVAM_STT_LANGUAGE` (default `unknown`, auto-detect), `SARVAM_TTS_MODEL` (default `bulbul:v3`), `SARVAM_TTS_LANGUAGE` (default `en-IN`), `SARVAM_TTS_SPEAKER` (default `shubh`).
+
+Deleting a candidate removes their call records here, but not Vapi's copy of the recording and transcript; delete those in the Vapi dashboard if required.

@@ -20,3 +20,8 @@ htmlcov/
 *.log
 .DS_Store
 Thumbs.db
+
+# The voice bridge has its own image (voice_bridge/Dockerfile).
+voice_bridge/
+.worktrees/
+.planning/

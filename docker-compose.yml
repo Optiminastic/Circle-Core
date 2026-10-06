@@ -48,6 +48,26 @@ services:
       - internal          # to reach the db service
       - proxy             # so avora's Caddy can reach this container
 
+  # Sarvam speech bridge for AI screening calls. Vapi connects to it over the
+  # internet via Caddy (voice.circle.optiminastic.com -> circle-voice-bridge:8080).
+  voice-bridge:
+    build: ./voice_bridge
+    container_name: circle-voice-bridge
+    restart: unless-stopped
+    # Only what the bridge needs (interpolated from .env), not the API's secrets.
+    environment:
+      VOICE_BRIDGE_SECRET: ${VOICE_BRIDGE_SECRET:-}
+      SARVAM_API_KEY: ${SARVAM_API_KEY:-}
+      SARVAM_STT_MODEL: ${SARVAM_STT_MODEL:-saaras:v3}
+      SARVAM_STT_LANGUAGE: ${SARVAM_STT_LANGUAGE:-unknown}
+      SARVAM_TTS_MODEL: ${SARVAM_TTS_MODEL:-bulbul:v3}
+      SARVAM_TTS_LANGUAGE: ${SARVAM_TTS_LANGUAGE:-en-IN}
+      SARVAM_TTS_SPEAKER: ${SARVAM_TTS_SPEAKER:-shubh}
+    expose:
+      - "8080"
+    networks:
+      - proxy
+
 networks:
   internal:
   proxy:
