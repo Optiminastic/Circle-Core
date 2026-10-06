@@ -59,7 +59,7 @@ async def synthesize(
     try:
         audios = response.json().get("audios") or []
         pcm = b"".join(pcm_from_wav(base64.b64decode(audio), sample_rate) for audio in audios)
-    except (ValueError, AttributeError) as exc:  # bad JSON, base64 or WAV
+    except (ValueError, TypeError, AttributeError) as exc:  # bad JSON, base64 or WAV
         raise SarvamError("Sarvam text-to-speech returned unusable audio") from exc
     if not pcm:
         raise SarvamError("Sarvam text-to-speech returned no audio")
