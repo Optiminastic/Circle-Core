@@ -85,3 +85,10 @@ def test_timeouts_and_resets_become_voice_call_error(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(vapi.urllib.request, "urlopen", failing)
     with pytest.raises(VoiceCallError):
         client().create_web_call({})
+
+
+def test_sends_a_browser_like_user_agent(sent: list[Any]) -> None:
+    # Cloudflare in front of Vapi rejects Python's default urllib agent (error 1010).
+    client().create_web_call({})
+    assert "Python-urllib" not in (sent[0].get_header("User-agent") or "")
+    assert sent[0].get_header("User-agent")

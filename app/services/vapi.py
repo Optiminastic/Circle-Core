@@ -18,6 +18,9 @@ from app.services.voice_call_provider import CreatedCall, VoiceCallError
 
 _TIMEOUT_SECONDS = 15
 _MAX_ERROR_DETAIL = 300
+# Vapi sits behind Cloudflare, which answers Python's default urllib
+# User-Agent with "error code: 1010" (seen live) - same as ongrid.py.
+_HTTP_USER_AGENT = "Mozilla/5.0 (compatible; CurcleBackend/1.0; +https://optiminastic.com)"
 
 
 class VapiClient:
@@ -53,6 +56,7 @@ class VapiClient:
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
+                "User-Agent": _HTTP_USER_AGENT,
             },
             method="POST",
         )
