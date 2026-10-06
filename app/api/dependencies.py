@@ -23,6 +23,9 @@ from app.services.audit_service import AuditService
 from app.services.identity_sync import IdentitySyncService
 from app.services.google_calendar import GoogleCalendarService
 from app.services.resource_service import ResourceService
+from app.services.screening_call_assistant import AssistantSettings
+from app.services.screening_calls import ScreeningCallService
+from app.services.vapi import VapiClient
 from app.services.sessions import read_session
 from app.storage.base import FileStorage
 
@@ -58,6 +61,44 @@ def get_audit_service(session: Session = Depends(get_session)) -> AuditService:
     # Shares the per-request session; AUTOCOMMIT means the audit insert commits
     # independently of the primary write, so it can't roll one back.
     return AuditService(AuditRepository(session))
+
+
+def get_screening_call_service(
+    repo: DocumentRepository = Depends(get_repository),
+    audit: AuditService = Depends(get_audit_service),
+    settings: Settings = Depends(get_settings),
+) -> ScreeningCallService:
+    """AI screening calls; provider is None until Vapi is configured (the service answers 503)."""
+    configured = settings.has_vapi
+    provider = (
+        VapiClient(
+            api_key=settings.vapi_api_key,
+            public_key=settings.vapi_public_key,
+            phone_number_id=settings.vapi_phone_number_id,
+            base_url=settings.vapi_base_url,
+        )
+        if configured
+        else None
+    )
+    assistant_settings = (
+        AssistantSettings(
+            webhook_url=settings.vapi_webhook_url,
+            webhook_secret=settings.vapi_webhook_secret,
+            bridge_url=settings.voice_bridge_url,
+            bridge_secret=settings.voice_bridge_secret,
+            llm_provider=settings.vapi_llm_provider,
+            llm_model=settings.vapi_llm_model,
+        )
+        if configured
+        else None
+    )
+    return ScreeningCallService(
+        repo=repo,
+        provider=provider,
+        assistant_settings=assistant_settings,
+        phone_enabled=settings.has_vapi_phone,
+        audit=audit,
+    )
 
 
 def get_identity_sync(

@@ -33,7 +33,9 @@ from app.api.routes import (
     notifications,
     public,
     resources,
+    screening_calls,
     test_public,
+    vapi_webhook,
 )
 from app.api.dependencies import get_resource_service
 from app.services.resource_service import ResourceService
@@ -58,7 +60,7 @@ def create_app() -> FastAPI:
         database = Database(settings)
         database.connect()
         if settings.auto_create_tables:
-            database.ensure_tables([*all_tables(), "documents", "email_otps", "audit_events"])
+            database.ensure_tables([*all_tables(), "documents", "email_otps", "audit_events", "screening_calls"])
             # Must follow ensure_tables: the sync statement reads `employees` to
             # fast-forward the sequence past codes the old random scheme issued.
             database.ensure_employee_code_sequence()
@@ -129,6 +131,8 @@ def create_app() -> FastAPI:
         ]
     )
     public_write_paths = {"/api/public/apply", "/api/candidates", "/api/documents", "/api/auth/login"}
+    SCREENING_CALLS_PATH = screening_calls.router.prefix
+    VAPI_WEBHOOK_PATH = f"{vapi_webhook.router.prefix}/webhook"
 
     def _is_public_upload(path: str) -> bool:
         """Public, token-gated file-upload endpoints (onboarding, exit handover,
@@ -189,8 +193,16 @@ def create_app() -> FastAPI:
         path = request.url.path
         if settings.rate_limit_enabled and request.method == "POST":
             ip = client_ip(request)
+            # Vapi call events: generous per-IP cap, enough for many live calls.
+            if path == VAPI_WEBHOOK_PATH:
+                if not public_read_limiter.allow(ip):
+                    return _too_many(ip, path)
+            # Starting an AI call costs money - strict per-IP cap, no HR exemption.
+            elif path == SCREENING_CALLS_PATH:
+                if not public_write_limiter.allow(ip):
+                    return _too_many(ip, path)
             # Public token-gated uploads — never origin-exempt; looser per-IP cap.
-            if _is_public_upload(path):
+            elif _is_public_upload(path):
                 if not public_upload_limiter.allow(ip):
                     return _too_many(ip, path)
             # Apply, credential submission, and HR writes — strict per-IP cap.
@@ -266,6 +278,10 @@ def create_app() -> FastAPI:
     # through to the generic router).
     app.include_router(candidate_delete.router)
     app.include_router(candidate_promote.router)
+    # AI screening calls (HR) and Vapi's call events - literal paths, before the
+    # generic /api/{resource} router.
+    app.include_router(screening_calls.router)
+    app.include_router(vapi_webhook.router)
     app.include_router(employee_codes.router)
     # Server-to-server pay/bank/documents for Avora (own secret). Literal
     # /api/internal/avora/* paths, before the generic /api/{resource} router.

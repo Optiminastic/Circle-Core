@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from app.services.voice_call_provider import CreatedCall, VoiceCallError
+
 Document = dict[str, Any]
 
 
@@ -49,3 +51,24 @@ class InMemoryDocumentRepository:
 
     def delete(self, table: str, item_id: str) -> bool:
         return self._table(table).pop(item_id, None) is not None
+
+
+class FakeVoiceCallProvider:
+    """Records calls instead of dialling; can be told to fail."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.phone_calls: list[tuple[dict[str, Any], str]] = []
+        self.web_calls: list[dict[str, Any]] = []
+
+    def create_phone_call(self, assistant: dict[str, Any], to_number: str) -> CreatedCall:
+        if self.fail:
+            raise VoiceCallError("boom", status=500)
+        self.phone_calls.append((assistant, to_number))
+        return CreatedCall(provider_call_id=f"vapi-{len(self.phone_calls)}")
+
+    def create_web_call(self, assistant: dict[str, Any]) -> CreatedCall:
+        if self.fail:
+            raise VoiceCallError("boom", status=500)
+        self.web_calls.append(assistant)
+        return CreatedCall(provider_call_id=f"web-{len(self.web_calls)}", web_call_url="https://vapi.daily.co/r")

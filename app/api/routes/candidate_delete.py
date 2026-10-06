@@ -44,6 +44,7 @@ _CHILD_BY_FIELD = (
     "interviews",
     "iq_tests",
     "assignments",
+    "screening_calls",
 )
 # Tables keyed directly by candidateId — deleted by the candidate id itself.
 _CHILD_BY_KEY = ("bgvs", "onboarding", "candidate_handoffs")
