@@ -8,7 +8,11 @@ _BEARER_PREFIX = "Bearer "
 
 
 def is_authorized(authorization: str | None, expected_secret: str) -> bool:
-    """Constant-time check of an `Authorization: Bearer <secret>` header."""
+    """Constant-time check of an `Authorization: Bearer <secret>` header.
+
+    Compared as bytes: compare_digest raises TypeError on non-ASCII str, and
+    headers arrive latin-1 decoded, so a junk header must not become a 500.
+    """
     if not expected_secret or not authorization or not authorization.startswith(_BEARER_PREFIX):
         return False
-    return secrets.compare_digest(authorization[len(_BEARER_PREFIX) :], expected_secret)
+    return secrets.compare_digest(authorization[len(_BEARER_PREFIX) :].encode(), expected_secret.encode())

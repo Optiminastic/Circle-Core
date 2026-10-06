@@ -49,3 +49,10 @@ def test_rejects_stereo_or_8_bit_wav() -> None:
 def test_rejects_non_wav() -> None:
     with pytest.raises(AudioFormatError):
         pcm_from_wav(b"not a wav file at all")
+
+
+def test_rejects_wav_at_an_unexpected_rate() -> None:
+    pcm = samples(1, 2)
+    assert pcm_from_wav(wav(pcm), expected_rate=16000) == pcm
+    with pytest.raises(AudioFormatError):
+        pcm_from_wav(wav(pcm), expected_rate=24000)

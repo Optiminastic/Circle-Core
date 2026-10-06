@@ -30,6 +30,8 @@ CUSTOMER_CHANNEL = 0
 # Batch Vapi's ~20 ms frames into ~100 ms chunks before sending to Sarvam.
 CHUNK_SECONDS = 0.1
 POLICY_VIOLATION = 1008
+START_FRAME_TIMEOUT_SECONDS = 10
+MAX_CHANNELS = 2
 
 StreamOpener = Callable[[BridgeSettings, int], AbstractAsyncContextManager[TranscriptStream]]
 
@@ -59,7 +61,11 @@ def create_app(
     async def synthesize_speech(request: Request, authorization: str | None = Header(default=None)) -> Response:
         if not is_authorized(authorization, config.bridge_secret):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-        text, sample_rate = _voice_request(await request.json())
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Body is not JSON") from exc
+        text, sample_rate = _voice_request(body)
         try:
             pcm = await synthesize(request.app.state.http, config, text, sample_rate)
         except SarvamError as exc:
@@ -74,14 +80,13 @@ def create_app(
             return
         await websocket.accept()
         try:
-            start = json.loads(await websocket.receive_text())
-            sample_rate = int(start.get("sampleRate", 0))
-            channels = int(start.get("channels", 1))
+            first = await asyncio.wait_for(websocket.receive(), START_FRAME_TIMEOUT_SECONDS)
+            sample_rate, channels = _start_frame(first)
             async with open_stream(config, sample_rate) as stream:
                 await _relay(websocket, stream, sample_rate, channels)
         except WebSocketDisconnect:
             pass
-        except (SarvamError, ValueError, json.JSONDecodeError) as exc:
+        except (SarvamError, ValueError, TimeoutError) as exc:
             logger.warning("Transcriber session ended with error: %s", type(exc).__name__)
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
 
@@ -101,19 +106,44 @@ def _voice_request(body: Any) -> tuple[str, int]:
     return text, sample_rate
 
 
+def _start_frame(message: dict[str, Any]) -> tuple[int, int]:
+    """Validate Vapi's first frame: {"type": "start", "sampleRate": ..., "channels": ...}."""
+    if message.get("type") == "websocket.disconnect":
+        raise WebSocketDisconnect()
+    try:
+        start = json.loads(message.get("text") or "")
+    except ValueError as exc:
+        raise ValueError("First frame is not JSON") from exc
+    if not isinstance(start, dict) or start.get("type") != "start":
+        raise ValueError("First frame is not a start message")
+    if start.get("encoding", "linear16") != "linear16" or start.get("container", "raw") != "raw":
+        raise ValueError("Only raw linear16 audio is supported")
+    sample_rate, channels = start.get("sampleRate"), start.get("channels", 1)
+    if not isinstance(sample_rate, int) or not isinstance(channels, int) or not 1 <= channels <= MAX_CHANNELS:
+        raise ValueError("Bad sample rate or channel count")
+    return sample_rate, channels
+
+
 async def _relay(websocket: WebSocket, stream: TranscriptStream, sample_rate: int, channels: int) -> None:
-    """Audio Vapi -> Sarvam and transcripts Sarvam -> Vapi until either side stops."""
-    tasks = [
-        asyncio.create_task(_pump_audio(websocket, stream, sample_rate, channels)),
-        asyncio.create_task(_send_transcripts(websocket, stream)),
-    ]
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    for task in pending:
-        task.cancel()
-    for task in done:
-        error = task.exception()
-        if error is not None:
-            raise error
+    """Audio Vapi -> Sarvam and transcripts Sarvam -> Vapi until either side stops.
+
+    Both tasks are always cancelled and awaited, even if this coroutine is
+    cancelled, so neither can outlive the Sarvam connection it uses.
+    """
+    pump = asyncio.create_task(_pump_audio(websocket, stream, sample_rate, channels))
+    relay = asyncio.create_task(_send_transcripts(websocket, stream))
+    try:
+        await asyncio.wait({pump, relay}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (pump, relay):
+            task.cancel()
+        results = await asyncio.gather(pump, relay, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception):
+            raise result
+    if relay.done() and not relay.cancelled() and not (pump.done() and not pump.cancelled()):
+        # Sarvam closed while Vapi was still sending audio: transcription stopped.
+        raise SarvamError("Sarvam ended the transcript stream early")
 
 
 async def _pump_audio(websocket: WebSocket, stream: TranscriptStream, sample_rate: int, channels: int) -> None:

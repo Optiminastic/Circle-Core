@@ -13,6 +13,10 @@ RUN pip install -r requirements.txt
 
 COPY bridge ./bridge
 
+# Never run as root.
+RUN useradd --system --no-create-home bridge
+USER bridge
+
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

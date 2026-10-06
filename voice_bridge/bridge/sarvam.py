@@ -23,6 +23,9 @@ TTS_TIMEOUT_SECONDS = 15
 # Sarvam accepts up to 2500 characters per bulbul:v3 request; agent turns are short.
 MAX_TTS_CHARS = 2500
 STT_SAMPLE_RATES = (8000, 16000)
+STT_CONNECT_TIMEOUT_SECONDS = 10
+# Everything the websockets client raises for a failed or dropped connection.
+_TRANSPORT_ERRORS = (websockets.WebSocketException, OSError, TimeoutError)
 _API_KEY_HEADER = "api-subscription-key"
 
 
@@ -53,10 +56,14 @@ async def synthesize(
         raise SarvamError("Could not reach Sarvam text-to-speech") from exc
     if response.status_code != httpx.codes.OK:
         raise SarvamError(f"Sarvam text-to-speech returned {response.status_code}")
-    audios = response.json().get("audios") or []
-    if not audios:
+    try:
+        audios = response.json().get("audios") or []
+        pcm = b"".join(pcm_from_wav(base64.b64decode(audio), sample_rate) for audio in audios)
+    except (ValueError, AttributeError) as exc:  # bad JSON, base64 or WAV
+        raise SarvamError("Sarvam text-to-speech returned unusable audio") from exc
+    if not pcm:
         raise SarvamError("Sarvam text-to-speech returned no audio")
-    return b"".join(pcm_from_wav(base64.b64decode(audio)) for audio in audios)
+    return pcm
 
 
 class TranscriptStream(Protocol):
@@ -80,18 +87,32 @@ class SarvamTranscriptStream:
                 "encoding": "audio/wav",
             }
         }
-        await self._connection.send(json.dumps(message))
+        try:
+            await self._connection.send(json.dumps(message))
+        except _TRANSPORT_ERRORS as exc:
+            raise SarvamError("Lost the Sarvam speech-to-text connection") from exc
 
     async def transcripts(self) -> AsyncIterator[str]:
-        async for raw in self._connection:
-            message = json.loads(raw)
-            if message.get("type") == "error":
-                raise SarvamError("Sarvam speech-to-text reported an error")
-            if message.get("type") != "data":
-                continue  # VAD events
-            text = (message.get("data") or {}).get("transcript", "").strip()
-            if text:
-                yield text
+        try:
+            async for raw in self._connection:
+                text = _transcript_from(raw)
+                if text:
+                    yield text
+        except _TRANSPORT_ERRORS as exc:
+            raise SarvamError("Lost the Sarvam speech-to-text connection") from exc
+
+
+def _transcript_from(raw: str | bytes) -> str:
+    """The transcript in one Sarvam message, or "" for VAD events."""
+    try:
+        message = json.loads(raw)
+        if message.get("type") == "error":
+            raise SarvamError("Sarvam speech-to-text reported an error")
+        if message.get("type") != "data":
+            return ""
+        return str((message.get("data") or {}).get("transcript") or "").strip()
+    except (ValueError, AttributeError) as exc:
+        raise SarvamError("Sarvam speech-to-text sent an unreadable message") from exc
 
 
 @asynccontextmanager
@@ -109,8 +130,15 @@ async def open_transcript_stream(settings: BridgeSettings, sample_rate: int) -> 
             "vad_signals": "true",
         }
     )
-    async with websockets.connect(
-        f"{settings.sarvam_ws_url}?{query}",
-        additional_headers={_API_KEY_HEADER: settings.sarvam_api_key},
-    ) as connection:
+    try:
+        connection = await websockets.connect(
+            f"{settings.sarvam_ws_url}?{query}",
+            additional_headers={_API_KEY_HEADER: settings.sarvam_api_key},
+            open_timeout=STT_CONNECT_TIMEOUT_SECONDS,
+        )
+    except _TRANSPORT_ERRORS as exc:  # includes a rejected key (InvalidStatus)
+        raise SarvamError("Could not open Sarvam speech-to-text") from exc
+    try:
         yield SarvamTranscriptStream(connection, sample_rate)
+    finally:
+        await connection.close()

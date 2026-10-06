@@ -30,8 +30,12 @@ def channel_from_interleaved(pcm: bytes, channel: int, channels: int) -> bytes:
     return picked.tobytes()
 
 
-def pcm_from_wav(wav: bytes) -> bytes:
-    """Return the sample data of a mono 16-bit PCM WAV, without its header."""
+def pcm_from_wav(wav: bytes, expected_rate: int | None = None) -> bytes:
+    """Return the sample data of a mono 16-bit PCM WAV, without its header.
+
+    With `expected_rate`, a WAV at any other rate is refused: played at the
+    wrong rate it would come out at the wrong pitch and speed.
+    """
     if len(wav) < _RIFF_HEADER_BYTES or wav[:4] != b"RIFF" or wav[8:12] != b"WAVE":
         raise AudioFormatError("Not a WAV file")
     offset = _RIFF_HEADER_BYTES
@@ -41,11 +45,16 @@ def pcm_from_wav(wav: bytes) -> bytes:
         (size,) = struct.unpack("<I", wav[offset + 4 : offset + 8])
         body = offset + _CHUNK_HEADER_BYTES
         if chunk_id == b"fmt ":
-            audio_format, channels, _rate, _byte_rate, _align, bits = struct.unpack("<HHIIHH", wav[body : body + 16])
-            format_ok = audio_format == _PCM_FORMAT and channels == 1 and bits == SAMPLE_WIDTH_BYTES * 8
+            audio_format, channels, rate, _byte_rate, _align, bits = struct.unpack("<HHIIHH", wav[body : body + 16])
+            format_ok = (
+                audio_format == _PCM_FORMAT
+                and channels == 1
+                and bits == SAMPLE_WIDTH_BYTES * 8
+                and (expected_rate is None or rate == expected_rate)
+            )
         elif chunk_id == b"data":
             if not format_ok:
-                raise AudioFormatError("WAV is not mono 16-bit PCM")
+                raise AudioFormatError("WAV is not mono 16-bit PCM at the expected rate")
             # Streamed WAVs may carry a placeholder size; never read past the end.
             return wav[body : min(body + size, len(wav))]
         offset = body + size + (size % 2)  # chunks are word-aligned

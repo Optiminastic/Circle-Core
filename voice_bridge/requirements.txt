@@ -1,4 +1,5 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-httpx>=0.27
-websockets>=13.0
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+httpx>=0.27,<1
+# 14+ for the asyncio client's `additional_headers` (13 used `extra_headers`).
+websockets>=14,<16
