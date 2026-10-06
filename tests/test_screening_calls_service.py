@@ -254,3 +254,43 @@ def test_unknown_calls_and_types_are_ignored(repo: Any) -> None:
     assert svc.apply_event({"type": "end-of-call-report"}) is False
     call = svc.start_call("c1", "web", HR)
     assert svc.apply_event({"type": "transcript", "call": {"id": call["vapiCallId"]}}) is False
+
+
+def test_webhook_landing_while_call_is_created_is_not_overwritten(repo: Any) -> None:
+    class RacingProvider(FakeVoiceCallProvider):
+        """Vapi reports "ringing" (via metadata) before create_web_call returns."""
+
+        def create_web_call(self, assistant: dict[str, Any]) -> Any:
+            svc.apply_event(
+                {
+                    "type": "status-update",
+                    "status": "ringing",
+                    "call": {"id": "web-1", "assistant": {"metadata": assistant["metadata"]}},
+                }
+            )
+            return super().create_web_call(assistant)
+
+    svc = service(repo, RacingProvider())
+    call = svc.start_call("c1", "web", HR)
+    stored = repo.get("screening_calls", call["id"])
+    assert stored["status"] == "ringing"
+    assert stored["vapiCallId"] == "web-1"
+    assert call["status"] == "ringing"
+
+
+def test_a_queued_call_that_never_connected_stops_blocking_after_a_few_minutes(repo: Any) -> None:
+    clock = Clock()
+    svc = service(repo, clock=clock)
+    svc.start_call("c1", "web", HR)  # HR never opened the link
+    clock.now += timedelta(minutes=4)
+    svc.start_call("c1", "web", HR)
+
+
+def test_a_connected_call_keeps_blocking_within_the_call_window(repo: Any) -> None:
+    clock = Clock()
+    svc = service(repo, clock=clock)
+    call = svc.start_call("c1", "web", HR)
+    svc.apply_event({"type": "status-update", "status": "in-progress", "call": {"id": call["vapiCallId"]}})
+    clock.now += timedelta(minutes=4)
+    with pytest.raises(CallAlreadyActive):
+        svc.start_call("c1", "web", HR)

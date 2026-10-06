@@ -114,7 +114,10 @@ def test_list_returns_calls(monkeypatch: pytest.MonkeyPatch, stub: StubService) 
 
 
 def test_start_is_rate_limited(monkeypatch: pytest.MonkeyPatch, stub: StubService) -> None:
-    client = make_client(monkeypatch, stub, user=HR, PUBLIC_RATE_LIMIT_PER_MINUTE="2")
+    import app.main
+
+    monkeypatch.setattr(app.main, "SCREENING_CALLS_PER_MINUTE", 2)
+    client = make_client(monkeypatch, stub, user=HR)
     payload = {"candidateId": "c1", "mode": "web"}
     codes = [client.post("/api/screening-calls", json=payload).status_code for _ in range(3)]
     assert codes == [201, 201, 429]
@@ -149,3 +152,24 @@ def test_webhook_rejects_payload_without_message(monkeypatch: pytest.MonkeyPatch
     response = client.post("/api/vapi/webhook", json={"nope": 1}, headers={"X-Vapi-Secret": WEBHOOK_SECRET})
     assert response.status_code == 422
     assert stub.events == []
+
+
+def test_webhook_non_ascii_secret_is_401_not_500(monkeypatch: pytest.MonkeyPatch, stub: StubService) -> None:
+    client = make_client(monkeypatch, stub, user=None)
+    response = client.post("/api/vapi/webhook", json=EVENT, headers={"X-Vapi-Secret": "été".encode("latin-1")})
+    assert response.status_code == 401
+
+
+def test_webhook_checks_secret_before_reading_the_body(monkeypatch: pytest.MonkeyPatch, stub: StubService) -> None:
+    client = make_client(monkeypatch, stub, user=None)
+    assert client.post("/api/vapi/webhook", json={"junk": True}).status_code == 401
+
+
+def test_webhook_is_rate_limited(monkeypatch: pytest.MonkeyPatch, stub: StubService) -> None:
+    import app.main
+
+    monkeypatch.setattr(app.main, "VAPI_EVENTS_PER_MINUTE", 1)
+    client = make_client(monkeypatch, stub, user=None)
+    headers = {"X-Vapi-Secret": WEBHOOK_SECRET}
+    codes = [client.post("/api/vapi/webhook", json=EVENT, headers=headers).status_code for _ in range(2)]
+    assert codes == [200, 429]

@@ -63,8 +63,9 @@ class VapiClient:
             # Vapi error bodies describe the request, never echo our key.
             detail = exc.read().decode("utf-8", "replace")[:_MAX_ERROR_DETAIL]
             raise VoiceCallError(f"Vapi {exc.code}: {detail}", status=exc.code) from exc
-        except urllib.error.URLError as exc:
-            raise VoiceCallError(f"Could not reach Vapi: {exc.reason}") from exc
+        except OSError as exc:
+            # URLError, socket timeouts and connection resets are all OSErrors.
+            raise VoiceCallError(f"Could not reach Vapi: {type(exc).__name__}") from exc
         try:
             parsed = json.loads(raw) if raw else {}
         except json.JSONDecodeError as exc:

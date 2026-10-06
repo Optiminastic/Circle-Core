@@ -13,6 +13,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+from app.core.logging import get_logger
 from app.repositories.base import DocumentRepository
 from app.services.audit_service import AuditService
 from app.services.phone import InvalidPhoneError, normalize_indian_mobile
@@ -23,6 +24,8 @@ from app.services.screening_call_assistant import (
 )
 from app.services.screening_call_results import score_call
 from app.services.voice_call_provider import CreatedCall, VoiceCallError, VoiceCallProvider
+
+logger = get_logger("curcle.screening_calls")
 
 TABLE = "screening_calls"
 CallMode = Literal["phone", "web"]
@@ -42,6 +45,9 @@ _NO_ANSWER_REASONS = ("did-not-answer", "busy", "voicemail")
 _FAILURE_MARKERS = ("error", "failed")
 # A call whose webhook never arrived must not block new calls forever.
 _STALE_AFTER = timedelta(seconds=MAX_CALL_SECONDS * 2)
+# A call still "queued" this long never connected (e.g. HR never opened the
+# browser test link), so it stops blocking much sooner.
+_QUEUED_STALE_AFTER = timedelta(minutes=3)
 _MAX_TRANSCRIPT_CHARS = 50_000
 _MAX_REASON_CHARS = 120
 _QUESTION_FIELDS = ("id", "text", "type", "importance", "category", "expectedAnswer", "options", "expectedOption")
@@ -129,8 +135,7 @@ class ScreeningCallService:
             settings=settings,
         )
         created = self._place_call(call, provider, assistant, to_number)
-        call.update(vapiCallId=created.provider_call_id, webCallUrl=created.web_call_url)
-        self._repo.upsert(TABLE, call["id"], call)
+        call = self._bind_provider_call(call, created)
         self._record("screening_call.started", f"Started AI screening call ({mode})", call, actor)
         return call
 
@@ -152,10 +157,27 @@ class ScreeningCallService:
             raise CannotCall("The candidate's phone number is not a valid Indian mobile") from exc
 
     def _ensure_no_active_call(self, candidate_id: str) -> None:
-        stale_before = _iso(self._clock() - _STALE_AFTER)
         for call in self._repo.find(TABLE, {"candidateId": candidate_id}):
-            if call.get("status") in ACTIVE_STATUSES and (call.get("startedAt") or "") > stale_before:
+            if self._is_blocking(call):
                 raise CallAlreadyActive("A screening call is already in progress for this candidate")
+
+    def _is_blocking(self, call: dict[str, Any]) -> bool:
+        status = call.get("status")
+        if status not in ACTIVE_STATUSES:
+            return False
+        window = _QUEUED_STALE_AFTER if status == QUEUED else _STALE_AFTER
+        return (call.get("startedAt") or "") > _iso(self._clock() - window)
+
+    def _bind_provider_call(self, call: dict[str, Any], created: CreatedCall) -> dict[str, Any]:
+        """Store the provider ids without undoing a webhook that landed meanwhile.
+
+        Vapi can report "ringing" (found via metadata) before create returns, so
+        merge into the current row instead of writing our stale copy back.
+        """
+        current = self._repo.get(TABLE, call["id"]) or call
+        current.update(vapiCallId=created.provider_call_id, webCallUrl=created.web_call_url)
+        self._repo.upsert(TABLE, current["id"], current)
+        return current
 
     def _new_call(
         self,
@@ -199,6 +221,7 @@ class ScreeningCallService:
                 return provider.create_web_call(assistant)
             return provider.create_phone_call(assistant, to_number)
         except VoiceCallError as exc:
+            logger.warning("Vapi rejected screening call %s: status=%s", call["id"], exc.status)
             call.update(status=FAILED, endedAt=_iso(self._clock()), endedReason="provider-rejected")
             self._repo.upsert(TABLE, call["id"], call)
             raise ProviderRejected("The calling service rejected the call. Try again shortly.") from exc

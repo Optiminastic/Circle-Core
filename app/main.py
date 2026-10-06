@@ -51,6 +51,12 @@ from app.storage.s3_storage import S3FileStorage
 logger = get_logger("curcle.main")
 
 
+# AI screening call rate limits (per client IP).
+SCREENING_CALLS_PER_MINUTE = 10
+SCREENING_CALLS_PER_HOUR = 100
+VAPI_EVENTS_PER_MINUTE = 600
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -131,8 +137,14 @@ def create_app() -> FastAPI:
         ]
     )
     public_write_paths = {"/api/public/apply", "/api/candidates", "/api/documents", "/api/auth/login"}
-    SCREENING_CALLS_PATH = screening_calls.router.prefix
-    VAPI_WEBHOOK_PATH = f"{vapi_webhook.router.prefix}/webhook"
+    screening_calls_path = screening_calls.router.prefix
+    vapi_webhook_path = f"{vapi_webhook.router.prefix}/webhook"
+    # Own buckets, so logins/applies from an office IP never eat the call budget
+    # and a busy hour of calls never drops Vapi's end-of-call reports.
+    screening_call_limiter = SlidingWindowRateLimiter(
+        [(SCREENING_CALLS_PER_MINUTE, 60.0), (SCREENING_CALLS_PER_HOUR, 3600.0)]
+    )
+    vapi_webhook_limiter = SlidingWindowRateLimiter([(VAPI_EVENTS_PER_MINUTE, 60.0)])
 
     def _is_public_upload(path: str) -> bool:
         """Public, token-gated file-upload endpoints (onboarding, exit handover,
@@ -193,13 +205,13 @@ def create_app() -> FastAPI:
         path = request.url.path
         if settings.rate_limit_enabled and request.method == "POST":
             ip = client_ip(request)
-            # Vapi call events: generous per-IP cap, enough for many live calls.
-            if path == VAPI_WEBHOOK_PATH:
-                if not public_read_limiter.allow(ip):
+            # Vapi call events (secret-gated): a loose cap that only stops floods.
+            if path == vapi_webhook_path:
+                if not vapi_webhook_limiter.allow(ip):
                     return _too_many(ip, path)
-            # Starting an AI call costs money - strict per-IP cap, no HR exemption.
-            elif path == SCREENING_CALLS_PATH:
-                if not public_write_limiter.allow(ip):
+            # Starting an AI call costs money - capped per IP, no HR exemption.
+            elif path == screening_calls_path:
+                if not screening_call_limiter.allow(ip):
                     return _too_many(ip, path)
             # Public token-gated uploads — never origin-exempt; looser per-IP cap.
             elif _is_public_upload(path):

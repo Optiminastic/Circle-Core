@@ -23,6 +23,7 @@ MAX_CALL_SECONDS = 420
 VOICE_TIMEOUT_SECONDS = 20
 _MAX_NAME_CHARS = 40
 _MAX_TITLE_CHARS = 80
+_MAX_OPTION_CHARS = 100
 _SERVER_MESSAGES = ["status-update", "end-of-call-report"]
 
 
@@ -120,7 +121,7 @@ def _describe_question(index: int, question: dict[str, Any]) -> str:
     text = _single_line(str(question.get("text", "")), 300)
     kind = question_type(question)
     if kind == "choice":
-        options = ", ".join(str(o) for o in question.get("options") or [])
+        options = ", ".join(_option(o) for o in question.get("options") or [])
         return f"{index + 1}. {text} (choice: {options})"
     if kind == "text":
         return f"{index + 1}. {text} (open answer)"
@@ -144,7 +145,7 @@ def _question_schema(question: dict[str, Any]) -> dict[str, Any]:
     kind = question_type(question)
     answer: dict[str, Any] = {"type": "string"}
     if kind == "choice":
-        answer["enum"] = [str(o) for o in question.get("options") or []] + [UNCLEAR]
+        answer["enum"] = [_option(o) for o in question.get("options") or []] + [UNCLEAR]
         answer["description"] = "The option the candidate picked, copied exactly, or Unclear."
     elif kind == "text":
         answer["description"] = "A short summary of the candidate's answer in English."
@@ -171,6 +172,10 @@ def _first_name(full_name: str) -> str:
     words = (full_name or "").split()
     first = words[0] if words else ""
     return re.sub(r"[^\w.'-]", "", first)[:_MAX_NAME_CHARS]
+
+
+def _option(value: Any) -> str:
+    return _single_line(str(value), _MAX_OPTION_CHARS)
 
 
 def _single_line(value: str, limit: int) -> str:

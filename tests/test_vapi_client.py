@@ -75,3 +75,13 @@ def test_missing_call_id_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(vapi.urllib.request, "urlopen", lambda r, timeout: _Response(b"{}"))
     with pytest.raises(VoiceCallError):
         client().create_phone_call({}, "+919876543210")
+
+
+@pytest.mark.parametrize("error", [TimeoutError("read timed out"), ConnectionResetError("reset")])
+def test_timeouts_and_resets_become_voice_call_error(monkeypatch: pytest.MonkeyPatch, error: OSError) -> None:
+    def failing(request: Any, timeout: float) -> Any:
+        raise error
+
+    monkeypatch.setattr(vapi.urllib.request, "urlopen", failing)
+    with pytest.raises(VoiceCallError):
+        client().create_web_call({})

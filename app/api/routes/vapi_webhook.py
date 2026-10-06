@@ -1,8 +1,9 @@
 """Vapi server messages for AI screening calls.
 
 Vapi posts call events here (status updates and the end-of-call report). Each
-assistant is built with this endpoint's URL and an X-Vapi-Secret header, so a
-request without the configured secret is rejected before anything is read.
+assistant is built with this endpoint's URL and an X-Vapi-Secret header. The
+secret is checked by a route dependency, which FastAPI runs before validating
+the body or opening a database session for the service.
 Replays are harmless: once a call is finished, later events for it are ignored
 (ScreeningCallService.apply_event), and the only thing this route can change is
 that call's own screening_calls row.
@@ -35,24 +36,32 @@ class VapiWebhookIn(BaseModel):
 
 
 def check_vapi_secret(provided: str | None, expected: str) -> None:
-    """Raise unless Vapi presented the configured shared secret."""
+    """Raise unless Vapi presented the configured shared secret.
+
+    Compared as bytes: compare_digest raises TypeError on non-ASCII str, which
+    would turn a junk header into a 500 instead of a 401.
+    """
     if not expected:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Vapi webhook is not configured.",
         )
-    if not provided or not secrets.compare_digest(provided, expected):
+    if not provided or not secrets.compare_digest(provided.encode(), expected.encode()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret.")
 
 
-@router.post("/webhook")
-def vapi_webhook(
-    payload: VapiWebhookIn,
+def require_vapi_secret(
     x_vapi_secret: str | None = Header(default=None),
     settings: Settings = Depends(get_settings),
+) -> None:
+    check_vapi_secret(x_vapi_secret, settings.vapi_webhook_secret)
+
+
+@router.post("/webhook", dependencies=[Depends(require_vapi_secret)])
+def vapi_webhook(
+    payload: VapiWebhookIn,
     service: ScreeningCallService = Depends(get_screening_call_service),
 ) -> dict[str, bool]:
-    check_vapi_secret(x_vapi_secret, settings.vapi_webhook_secret)
     applied = service.apply_event(payload.message)
     # Only the event type and outcome: transcripts and numbers are candidate PII.
     logger.info("Vapi event %s applied=%s", payload.message.get("type"), applied)
