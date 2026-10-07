@@ -104,3 +104,13 @@ def test_output_is_json_serialisable() -> None:
 
 def test_browser_callers_get_time_to_join() -> None:
     assert build()["customerJoinTimeoutSeconds"] >= 60
+
+
+def test_voice_audio_is_not_cached_by_vapi() -> None:
+    # The speaker is a bridge setting; cached audio would keep the old voice.
+    assert build()["voice"]["cachingEnabled"] is False
+
+
+def test_prompt_says_not_to_read_the_question_labels_aloud() -> None:
+    prompt = build()["model"]["messages"][0]["content"]
+    assert "Never read the brackets" in prompt

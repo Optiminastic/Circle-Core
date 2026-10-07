@@ -83,6 +83,9 @@ def build_screening_assistant(
                 "headers": bridge_auth,
                 "timeoutSeconds": VOICE_TIMEOUT_SECONDS,
             },
+            # The voice is chosen on the bridge (SARVAM_TTS_SPEAKER); Vapi's
+            # cache would keep replaying audio in the old voice after a change.
+            "cachingEnabled": False,
         },
         "maxDurationSeconds": MAX_CALL_SECONDS,
         "customerJoinTimeoutSeconds": CUSTOMER_JOIN_TIMEOUT_SECONDS,
@@ -110,6 +113,7 @@ def _system_prompt(first_name: str, title: str, questions: list[dict[str, Any]])
 Rules:
 - If they say it is not a good time or they do not want an AI call, thank them and end the call.
 - Ask the questions below one at a time, in this exact order. Do not skip or reword their meaning.
+- The labels in brackets after each question, like (yes/no) or (choice: ...), are notes for you. Never read the brackets or the word "yes/no" aloud; for a choice question, say the options naturally.
 - Speak in the language the candidate uses (English, Hindi or Hinglish). Keep every turn short.
 - After a "Yes" to a yes/no question, ask exactly one short follow-up asking for a concrete example (for example which account, which event, what they made). Then move on.
 - For a choice question, read the options and let them pick one.
