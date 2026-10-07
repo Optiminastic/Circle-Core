@@ -100,3 +100,7 @@ def test_no_questions_is_rejected() -> None:
 
 def test_output_is_json_serialisable() -> None:
     json.dumps(build())
+
+
+def test_browser_callers_get_time_to_join() -> None:
+    assert build()["customerJoinTimeoutSeconds"] >= 60

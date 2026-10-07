@@ -23,7 +23,7 @@ from bridge.auth import is_authorized
 from bridge.config import BridgeSettings, load_settings
 from bridge.sarvam import SarvamError, TranscriptStream, open_transcript_stream, synthesize
 
-logger = logging.getLogger("voice_bridge")
+logger = logging.getLogger("uvicorn.error")  # uvicorn configures this one
 
 VAPI_TTS_SAMPLE_RATES = (8000, 16000, 22050, 24000)
 CUSTOMER_CHANNEL = 0
@@ -76,6 +76,8 @@ def create_app(
     @app.websocket("/transcriber")
     async def transcriber(websocket: WebSocket) -> None:
         if not is_authorized(websocket.headers.get("authorization"), config.bridge_secret):
+            # Header names only (never values) so a provider auth change is debuggable.
+            logger.warning("Transcriber auth failed; header names: %s", sorted(websocket.headers.keys()))
             await websocket.close(code=POLICY_VIOLATION)
             return
         await websocket.accept()

@@ -19,6 +19,9 @@ YES_NO_ANSWERS = ("Yes", "No")
 FOLLOW_UP_STRENGTHS = ("strong", "weak", "n/a")
 # Hard stop so a confused call cannot run up cost.
 MAX_CALL_SECONDS = 420
+# Vapi's default of 15 s to join a browser test call is shorter than getting
+# past the join screen (seen live), so the call ended before HR could speak.
+CUSTOMER_JOIN_TIMEOUT_SECONDS = 60
 # How long Vapi waits for one text-to-speech reply from the bridge.
 VOICE_TIMEOUT_SECONDS = 20
 _MAX_NAME_CHARS = 40
@@ -82,6 +85,7 @@ def build_screening_assistant(
             },
         },
         "maxDurationSeconds": MAX_CALL_SECONDS,
+        "customerJoinTimeoutSeconds": CUSTOMER_JOIN_TIMEOUT_SECONDS,
         "server": {"url": settings.webhook_url, "headers": {"X-Vapi-Secret": settings.webhook_secret}},
         "serverMessages": _SERVER_MESSAGES,
         "analysisPlan": {"structuredDataPlan": {"enabled": True, "schema": _answer_schema(questions)}},
