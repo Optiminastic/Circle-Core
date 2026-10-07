@@ -55,3 +55,36 @@ def compute_fit(answers: list[dict[str, Any]]) -> str:
         return "Fit"
     rate = sum(1 for a in good_to_haves if a["passed"]) / len(good_to_haves)
     return "Fit" if rate >= FIT_THRESHOLD else "Borderline"
+
+
+def build_extra_answers(
+    questions: list[dict[str, Any]], responses: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Snapshot raw extra-question responses against the job's own questions.
+
+    Unlike build_answers/compute_fit, these are purely informational — no
+    pass/fail scoring, and they never feed Fit/Borderline/Unfit.
+    """
+    answers: list[dict[str, Any]] = []
+    for q in questions:
+        qid = str(q.get("id", ""))
+        answers.append(
+            {
+                "questionId": qid,
+                "text": q.get("text", ""),
+                "type": q.get("type", "text"),
+                "answer": str(responses.get(qid, "")),
+            }
+        )
+    return answers
+
+
+def missing_required_extra(questions: list[dict[str, Any]], responses: dict[str, str]) -> bool:
+    """True if any question marked `required` has no non-blank answer."""
+    for q in questions:
+        if not q.get("required"):
+            continue
+        qid = str(q.get("id", ""))
+        if not str(responses.get(qid, "")).strip():
+            return True
+    return False

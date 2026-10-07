@@ -16,9 +16,11 @@ from app.core.config import Settings, get_settings
 from app.core.errors import StorageError
 from app.db.database import Database
 from app.repositories.audit_repository import AuditRepository
+from app.repositories.identity_outbox_repository import IdentityOutboxRepository
 from app.repositories.base import DocumentRepository
 from app.repositories.document_repository import SqlAlchemyDocumentRepository
 from app.services.audit_service import AuditService
+from app.services.identity_sync import IdentitySyncService
 from app.services.google_calendar import GoogleCalendarService
 from app.services.resource_service import ResourceService
 from app.services.sessions import read_session
@@ -56,6 +58,15 @@ def get_audit_service(session: Session = Depends(get_session)) -> AuditService:
     # Shares the per-request session; AUTOCOMMIT means the audit insert commits
     # independently of the primary write, so it can't roll one back.
     return AuditService(AuditRepository(session))
+
+
+def get_identity_sync(
+    session: Session = Depends(get_session), settings: Settings = Depends(get_settings)
+) -> IdentitySyncService | None:
+    """Queue-only sync service (delivery runs in IdentitySyncWorker); None when disabled."""
+    if not settings.has_identity_sync:
+        return None
+    return IdentitySyncService(IdentityOutboxRepository(session))
 
 
 def get_google_calendar_service(

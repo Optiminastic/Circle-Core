@@ -28,15 +28,27 @@ from app.services.sessions import COOKIE_NAME, read_session
 from app.storage.base import FileStorage
 
 
+# Categories whose links must open WITHOUT a login, because they are handed to
+# people who have no Circle account: resumes (shared with interviewers),
+# exit-handover files (the departing employee's portal), take-home assignment
+# briefs (the public test page links them) and profile/welcome photos
+# (rendered as <img>, including in emails). Every other document - ID proofs, PAN,
+# Aadhaar, cancelled cheques, offer/appointment letters, BGV reports - needs a
+# dashboard session even when the id is known, so a forwarded or leaked link
+# exposes nothing sensitive.
+PUBLIC_VIEW_CATEGORIES = frozenset(
+    {"resume", "handover", "avatar", "Welcome Photo", "assignment-brief"}
+)
+
+
 def guard_documents(request: Request, settings: Settings = Depends(get_settings)) -> None:
-    """Public: view a document by its unguessable id (resume links in emails, the
-    exit-handover portal, the interviewer sheet) and the careers-apply resume
-    upload (per-IP rate limited). Listing all documents, deleting, and drive
-    imports require a dashboard session."""
+    """Public: viewing by id only - which `_require_view_access` then narrows to
+    PUBLIC_VIEW_CATEGORIES for callers without a session. Uploading, listing,
+    deleting and drive imports require a dashboard session. (The careers form
+    uploads its resume through /api/public/apply, never through here: an open
+    upload let anyone attach a file to any employee or candidate.)"""
     method, path = request.method, request.url.path.rstrip("/")
     if method == "GET" and (path.endswith("/preview") or path.endswith("/url")):
-        return
-    if method == "POST" and path == "/api/documents":  # resume upload (apply flow)
         return
     if not read_session(settings, request.cookies.get(COOKIE_NAME)):
         raise HTTPException(status_code=401, detail="Authentication required. Please sign in.")
@@ -135,6 +147,15 @@ def _get_or_404(repo: DocumentRepository, doc_id: str) -> dict[str, Any]:
     return doc
 
 
+def _require_view_access(request: Request, settings: Settings, doc: dict[str, Any]) -> None:
+    """Anyone may view a public-category document by id; everything else needs a
+    dashboard session."""
+    if doc.get("category") in PUBLIC_VIEW_CATEGORIES:
+        return
+    if not read_session(settings, request.cookies.get(COOKIE_NAME)):
+        raise HTTPException(status_code=401, detail="Authentication required. Please sign in.")
+
+
 @router.get("")
 def list_documents(
     entityType: str | None = None,
@@ -231,10 +252,13 @@ def import_from_drive(
 @router.get("/{doc_id}/url")
 def get_download_url(
     doc_id: str,
+    request: Request,
+    settings: Settings = Depends(get_settings),
     repo: DocumentRepository = Depends(get_repository),
     storage: FileStorage = Depends(get_storage),
 ) -> dict[str, Any]:
     doc = _get_or_404(repo, doc_id)
+    _require_view_access(request, settings, doc)
     # Serve the file inline so previewable types (PDF, images) open in the browser
     # tab instead of downloading; non-previewable types still resolve fine.
     filename = _safe_name(doc.get("fileName") or "file")
@@ -249,6 +273,8 @@ def get_download_url(
 @router.get("/{doc_id}/preview")
 def preview_document(
     doc_id: str,
+    request: Request,
+    settings: Settings = Depends(get_settings),
     repo: DocumentRepository = Depends(get_repository),
     storage: FileStorage = Depends(get_storage),
 ) -> Response:
@@ -259,6 +285,7 @@ def preview_document(
     the object store honours response-header overrides.
     """
     doc = _get_or_404(repo, doc_id)
+    _require_view_access(request, settings, doc)
     data, stored_type = storage.get(doc["storageKey"])
     filename = _safe_name(doc.get("fileName") or "file")
 

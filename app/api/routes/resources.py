@@ -11,10 +11,11 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
-from app.api.dependencies import current_user, get_audit_service, get_resource_service
+from app.api.dependencies import current_user, get_audit_service, get_identity_sync, get_resource_service
 from app.core.config import Settings, get_settings
 from app.domain.registry import get_resource
 from app.services.audit_service import AuditService
+from app.services.identity_sync import IdentitySyncService
 from app.services.resource_service import ResourceService
 from app.services.sessions import COOKIE_NAME, read_session
 
@@ -184,6 +185,19 @@ def _audit_patch(
         )
 
 
+# --- id-sync push --------------------------------------------------------------
+# Employee writes arrive through this generic router (status changes are made by
+# the frontend), so this is the one server-side place that sees every change.
+_EMPLOYEES = "employees"
+
+
+def _sync_employee(
+    identity_sync: IdentitySyncService | None, resource: str, doc: Document, *, removed: bool = False
+) -> None:
+    if identity_sync is not None and resource == _EMPLOYEES:
+        identity_sync.enqueue_employee(doc, removed=removed)
+
+
 @router.get("/{resource}")
 def list_all(
     resource: str,
@@ -208,15 +222,25 @@ def create(
     service: ResourceService = Depends(get_resource_service),
     user: dict[str, Any] | None = Depends(current_user),
     audit: AuditService = Depends(get_audit_service),
+    identity_sync: IdentitySyncService | None = Depends(get_identity_sync),
 ) -> Document:
     created = service.create(get_resource(resource), payload)
     _audit_create(audit, user, resource, created)
+    _sync_employee(identity_sync, resource, created)
     return created
 
 
 @router.put("/{resource}/{item_id}")
-def replace(resource: str, item_id: str, payload: Document = Body(...), service: ResourceService = Depends(get_resource_service)) -> Document:
-    return service.replace(get_resource(resource), item_id, payload)
+def replace(
+    resource: str,
+    item_id: str,
+    payload: Document = Body(...),
+    service: ResourceService = Depends(get_resource_service),
+    identity_sync: IdentitySyncService | None = Depends(get_identity_sync),
+) -> Document:
+    replaced = service.replace(get_resource(resource), item_id, payload)
+    _sync_employee(identity_sync, resource, replaced)
+    return replaced
 
 
 @router.patch("/{resource}/{item_id}")
@@ -227,11 +251,13 @@ def patch(
     service: ResourceService = Depends(get_resource_service),
     user: dict[str, Any] | None = Depends(current_user),
     audit: AuditService = Depends(get_audit_service),
+    identity_sync: IdentitySyncService | None = Depends(get_identity_sync),
 ) -> Document:
     if user is None:
         _reject_non_public_fields(resource, changes)
     updated = service.patch(get_resource(resource), item_id, changes)
     _audit_patch(audit, user, resource, item_id, changes, updated)
+    _sync_employee(identity_sync, resource, updated)
     return updated
 
 
@@ -252,6 +278,16 @@ def _reject_non_public_fields(resource: str, changes: Document) -> None:
 
 
 @router.delete("/{resource}/{item_id}", status_code=204, response_class=Response)
-def remove(resource: str, item_id: str, service: ResourceService = Depends(get_resource_service)) -> Response:
-    service.delete(get_resource(resource), item_id)
+def remove(
+    resource: str,
+    item_id: str,
+    service: ResourceService = Depends(get_resource_service),
+    identity_sync: IdentitySyncService | None = Depends(get_identity_sync),
+) -> Response:
+    resource_def = get_resource(resource)
+    # Read first: once deleted there is no email left to tell id-sync who left.
+    removed = service.get(resource_def, item_id) if identity_sync is not None and resource == _EMPLOYEES else None
+    service.delete(resource_def, item_id)
+    if removed is not None:
+        _sync_employee(identity_sync, resource, removed, removed=True)
     return Response(status_code=204)
