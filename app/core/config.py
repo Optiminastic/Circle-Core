@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # Optional key prefix (a "folder") all objects are stored under, e.g. "Circle".
     aws_s3_prefix: str = ""
     max_upload_mb: int = 15
+    # Take-home submissions get their own, larger ceiling: the work may be a
+    # screen recording or a design file, which the limit that suits an identity
+    # document would reject outright.
+    max_assignment_upload_mb: int = 100
 
     # Optional dedicated key for encrypting sensitive at-rest fields (exit-handover
     # credentials). If unset, a key is derived from existing app secrets.
