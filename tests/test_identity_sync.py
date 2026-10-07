@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import threading
+import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, ClassVar
@@ -53,6 +54,8 @@ def _employee(**overrides: Any) -> dict[str, Any]:
 
 def test_message_carries_the_directory_entry_only() -> None:
     message = to_push_message(_employee())
+    assert message is not None
+    assert message.pop("changed_at")  # when the change happened, for ordering
     assert message == {
         "employee": {
             "employee_code": "EMP-1001",
@@ -61,14 +64,33 @@ def test_message_carries_the_directory_entry_only() -> None:
             "designation": "Print Operator",
             "department": "Production",
             "status": "Active",
+            "manager_code": None,
+            "manager_name": "Some Person",
+            "joining_date": "2026-09-01",
+            "location": None,
         },
         "removed": False,
     }
 
 
+def test_picked_manager_is_sent_by_code() -> None:
+    message = to_push_message(_employee(reportingManagerId="EMP-1000", reportingManager="Rashi C"))
+    assert message is not None
+    assert message["employee"]["manager_code"] == "EMP-1000"
+    assert message["employee"]["manager_name"] == "Rashi C"
+
+
+def test_placeholder_manager_and_bad_date_are_dropped() -> None:
+    message = to_push_message(_employee(reportingManager="—", joiningDate="soon", workLocation=" Mumbai "))
+    assert message is not None
+    entry = message["employee"]
+    assert entry["manager_name"] is None and entry["joining_date"] is None
+    assert entry["location"] == "Mumbai"
+
+
 def test_sensitive_fields_never_leave_circle() -> None:
     body = json.dumps(to_push_message(_employee()))
-    for secret_value in ("ABCDE1234F", "600000", "Some Person"):
+    for secret_value in ("ABCDE1234F", "600000"):
         assert secret_value not in body
 
 
@@ -93,8 +115,8 @@ def test_unmatchable_employee_is_skipped(missing: str) -> None:
 def test_signature_matches_idsync_verifier() -> None:
     # Mirrors id-sync's require_circle_signature.
     body = b'{"a":1}'
-    expected = hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
-    assert hmac.compare_digest(sign(SECRET, body), expected)
+    expected = hmac.new(SECRET.encode(), b"1700000000." + body, hashlib.sha256).hexdigest()
+    assert hmac.compare_digest(sign(SECRET, 1700000000, body), expected)
 
 
 def test_backoff_grows_then_caps_at_an_hour() -> None:
@@ -107,12 +129,14 @@ def test_backoff_grows_then_caps_at_an_hour() -> None:
 
 
 class _FakeIdSync(BaseHTTPRequestHandler):
-    received: ClassVar[list[tuple[bytes, str | None]]] = []
+    received: ClassVar[list[tuple[bytes, str | None, str | None]]] = []
     status_code = 200
 
     def do_POST(self) -> None:
         body = self.rfile.read(int(self.headers["Content-Length"]))
-        type(self).received.append((body, self.headers.get(SIGNATURE_HEADER)))
+        type(self).received.append(
+            (body, self.headers.get(SIGNATURE_HEADER), self.headers.get("X-Timestamp"))
+        )
         self.send_response(type(self).status_code)
         self.end_headers()
 
@@ -132,9 +156,10 @@ def fake_idsync() -> Iterator[str]:
 
 def test_client_sends_signed_body(fake_idsync: str) -> None:
     IdentitySyncClient(fake_idsync, SECRET).send({"employee": {"employee_code": "EMP-1001"}})
-    (body, signature), = _FakeIdSync.received
+    (body, signature, timestamp), = _FakeIdSync.received
     assert json.loads(body) == {"employee": {"employee_code": "EMP-1001"}}
-    assert signature == sign(SECRET, body)
+    assert timestamp is not None and abs(int(timestamp) - time.time()) < 60
+    assert signature == sign(SECRET, int(timestamp), body)
 
 
 def test_client_raises_on_rejection(fake_idsync: str) -> None:
@@ -216,8 +241,25 @@ def test_change_during_delivery_is_not_lost(db_session: Any) -> None:
     service.enqueue_employee(_employee(status="Active"))
     (claimed,) = outbox.claim_due(limit=10, lease_seconds=60)
     service.enqueue_employee(_employee(status="Offboarded"))  # lands mid-delivery
+    # The newer version must NOT be sendable while the older one is on the
+    # wire (a second worker could deliver it first and be overwritten).
+    assert outbox.claim_due(limit=10, lease_seconds=60) == []
     outbox.mark_delivered(claimed)
 
+    (pending,) = outbox.claim_due(limit=10, lease_seconds=60)
+    assert pending.payload["employee"]["status"] == "Offboarded"
+
+
+@needs_db
+def test_newer_change_released_after_failed_older_send(db_session: Any) -> None:
+    from app.repositories.identity_outbox_repository import IdentityOutboxRepository
+
+    outbox = IdentityOutboxRepository(db_session)
+    service = IdentitySyncService(outbox)
+    service.enqueue_employee(_employee(status="Active"))
+    (claimed,) = outbox.claim_due(limit=10, lease_seconds=60)
+    service.enqueue_employee(_employee(status="Offboarded"))
+    outbox.mark_failed(claimed, error="boom", retry_in_seconds=3600)
     (pending,) = outbox.claim_due(limit=10, lease_seconds=60)
     assert pending.payload["employee"]["status"] == "Offboarded"
 

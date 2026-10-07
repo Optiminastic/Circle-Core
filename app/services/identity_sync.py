@@ -17,8 +17,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 
 from app.core.logging import get_logger
@@ -28,14 +30,15 @@ from app.services.directory_entry import to_directory_entry
 logger = get_logger("curcle.identity_sync")
 
 SIGNATURE_HEADER = "X-Signature"
+TIMESTAMP_HEADER = "X-Timestamp"
 # Cloudflare-style proxies reject urllib's default agent (see email_sender.py).
 _USER_AGENT = "circle-identity-sync/1.0"
 _REQUEST_TIMEOUT_SECONDS = 10
 
-CLAIM_BATCH_SIZE = 25
-# Long enough to cover one batch of slow requests; a crashed worker's rows
-# reappear after this.
-CLAIM_LEASE_SECONDS = 300
+CLAIM_BATCH_SIZE = 10
+# Longer than a worst-case batch (10 x ~20s per slow request), so a row is never
+# re-claimed while still being sent; a crashed worker's rows reappear after this.
+CLAIM_LEASE_SECONDS = 600
 _RETRY_BASE_SECONDS = 30
 _RETRY_MAX_SECONDS = 3600
 
@@ -49,12 +52,16 @@ def to_push_message(doc: dict[str, Any], *, removed: bool = False) -> dict[str, 
     entry = to_directory_entry(doc)
     if entry is None:
         return None
-    return {"employee": entry, "removed": removed}
+    # When the change happened, so id-sync can ignore an older change that
+    # arrives after a newer one.
+    changed_at = datetime.now(timezone.utc).isoformat()
+    return {"employee": entry, "removed": removed, "changed_at": changed_at}
 
 
-def sign(secret: str, body: bytes) -> str:
-    """Hex HMAC-SHA256 of the exact body, as id-sync's push endpoint expects."""
-    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+def sign(secret: str, timestamp: int, body: bytes) -> str:
+    """Hex HMAC-SHA256 of "<timestamp>.<body>", as id-sync's push endpoint
+    expects: a captured request stops being accepted after a few minutes."""
+    return hmac.new(secret.encode(), f"{timestamp}.".encode() + body, hashlib.sha256).hexdigest()
 
 
 def retry_delay_seconds(attempts: int) -> int:
@@ -74,6 +81,7 @@ class IdentitySyncClient:
 
     def send(self, message: dict[str, Any]) -> None:
         body = json.dumps(message, separators=(",", ":")).encode()
+        timestamp = int(time.time())
         request = urllib.request.Request(
             self._url,
             data=body,
@@ -81,7 +89,8 @@ class IdentitySyncClient:
             headers={
                 "Content-Type": "application/json",
                 "User-Agent": _USER_AGENT,
-                SIGNATURE_HEADER: sign(self._secret, body),
+                TIMESTAMP_HEADER: str(timestamp),
+                SIGNATURE_HEADER: sign(self._secret, timestamp, body),
             },
         )
         try:

@@ -53,7 +53,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
         with db.session() as session:
             repo = SqlAlchemyDocumentRepository(session)
             for doc_id, category in (("docresume001", "resume"), ("docaadhaar01", "Aadhaar card"),
-                                     ("dochandover1", "handover"), ("docgeneral01", "document")):
+                                     ("dochandover1", "handover"), ("docgeneral01", "document"),
+                                     ("docbrief0001", "assignment-brief")):
                 repo.upsert("documents", doc_id, {
                     "id": doc_id, "entityType": "employee", "entityId": "EMP-1",
                     "category": category, "fileName": f"{doc_id}.pdf",
@@ -71,7 +72,16 @@ def _login(client: Any) -> None:
     client.cookies.set(COOKIE_NAME, token)
 
 
-@pytest.mark.parametrize("doc_id", ["docresume001", "dochandover1"])
+def test_upload_needs_a_login(client: Any) -> None:
+    resp = client.post(
+        "/api/documents",
+        data={"entityType": "employee", "entityId": "EMP-1", "category": "Payslip"},
+        files={"file": ("x.pdf", b"%PDF", "application/pdf")},
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.parametrize("doc_id", ["docresume001", "dochandover1", "docbrief0001"])
 @pytest.mark.parametrize("endpoint", ["preview", "url"])
 def test_public_categories_open_without_login(client: Any, doc_id: str, endpoint: str) -> None:
     assert client.get(f"/api/documents/{doc_id}/{endpoint}").status_code == 200

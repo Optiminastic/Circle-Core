@@ -1,13 +1,22 @@
 """The directory-safe view of a Circle employee.
 
 Shared by the pull export (/api/directory/export) and the push to id-sync, so
-both always send the same narrow set of fields. PAN, Aadhaar, salary, CTC, bank
-details and appraisal history never leave Circle.
+both always send the same narrow set of fields: identity, job, reporting line,
+joining date and work location. PAN, Aadhaar, salary, CTC, bank details,
+personal details and appraisal history never leave Circle this way.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _text(value: Any) -> str | None:
+    text = str(value).strip() if isinstance(value, str) else ""
+    return text if text and text != "—" else None
 
 
 def to_directory_entry(doc: dict[str, Any]) -> dict[str, Any] | None:
@@ -23,4 +32,11 @@ def to_directory_entry(doc: dict[str, Any]) -> dict[str, Any] | None:
         "designation": doc.get("role") or None,   # Circle's "role" is the job title
         "department": doc.get("department") or None,
         "status": doc.get("status") or None,      # Active | On Leave | Suspended | Offboarded
+        # Reporting line: the manager's employee code when picked from the
+        # directory; older records only carry a typed name (matched downstream
+        # only when it is unambiguous).
+        "manager_code": _text(doc.get("reportingManagerId")),
+        "manager_name": _text(doc.get("reportingManager")),
+        "joining_date": joining if _ISO_DAY.match(joining := str(doc.get("joiningDate") or "")) else None,
+        "location": _text(doc.get("workLocation")),
     }

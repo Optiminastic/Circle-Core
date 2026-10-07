@@ -3,7 +3,9 @@
 One row per employee, holding the LATEST payload: a second change before the
 first is delivered replaces it (id-sync's push is an idempotent upsert, so only
 the newest state matters). `version` bumps on every enqueue so a delivery that
-raced a newer change never deletes the newer row.
+raced a newer change never deletes the newer row, and `in_flight` keeps a newer
+change from being sent while an older one is still on the wire (which could
+land second and overwrite it).
 
 The engine runs in AUTOCOMMIT, so every method is a single statement; claiming
 uses `FOR UPDATE SKIP LOCKED` inside one UPDATE so two API workers never send
@@ -27,6 +29,7 @@ CREATE TABLE IF NOT EXISTS "{TABLE}" (
     payload         JSONB NOT NULL,
     version         BIGINT NOT NULL DEFAULT 1,
     attempts        INTEGER NOT NULL DEFAULT 0,
+    in_flight       BOOLEAN NOT NULL DEFAULT false,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_error      TEXT,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -60,7 +63,10 @@ class IdentityOutboxRepository:
                     payload = EXCLUDED.payload,
                     version = "{TABLE}".version + 1,
                     attempts = 0,
-                    next_attempt_at = now(),
+                    -- While an older version is being sent, keep its lease:
+                    -- the newer one goes out right after (mark_delivered).
+                    next_attempt_at = CASE WHEN "{TABLE}".in_flight
+                                           THEN "{TABLE}".next_attempt_at ELSE now() END,
                     last_error = NULL,
                     updated_at = now()
                 """
@@ -75,7 +81,8 @@ class IdentityOutboxRepository:
             text(
                 f"""
                 UPDATE "{TABLE}"
-                   SET next_attempt_at = now() + make_interval(secs => :lease)
+                   SET next_attempt_at = now() + make_interval(secs => :lease),
+                       in_flight = true
                  WHERE employee_id IN (
                         SELECT employee_id FROM "{TABLE}"
                          WHERE next_attempt_at <= now()
@@ -90,10 +97,19 @@ class IdentityOutboxRepository:
         return [OutboxItem(r.employee_id, r.payload, r.version, r.attempts) for r in rows]
 
     def mark_delivered(self, item: OutboxItem) -> None:
-        self._session.execute(
+        deleted = self._session.execute(
             text(f'DELETE FROM "{TABLE}" WHERE employee_id = :id AND version = :version'),
             {"id": item.employee_id, "version": item.version},
         )
+        if deleted.rowcount == 0:
+            # A newer change arrived while this one was on the wire: send it now.
+            self._session.execute(
+                text(
+                    f'UPDATE "{TABLE}" SET in_flight = false, next_attempt_at = now() '
+                    "WHERE employee_id = :id"
+                ),
+                {"id": item.employee_id},
+            )
 
     def mark_failed(self, item: OutboxItem, *, error: str, retry_in_seconds: int) -> None:
         self._session.execute(
@@ -101,6 +117,7 @@ class IdentityOutboxRepository:
                 f"""
                 UPDATE "{TABLE}"
                    SET attempts = attempts + 1,
+                       in_flight = false,
                        next_attempt_at = now() + make_interval(secs => :delay),
                        last_error = :error,
                        updated_at = now()
@@ -113,4 +130,12 @@ class IdentityOutboxRepository:
                 "delay": retry_in_seconds,
                 "error": error[:_MAX_ERROR_CHARS],
             },
+        )
+        # If a newer version replaced this one meanwhile, release it to go now.
+        self._session.execute(
+            text(
+                f'UPDATE "{TABLE}" SET in_flight = false, next_attempt_at = now() '
+                "WHERE employee_id = :id AND version <> :version AND in_flight"
+            ),
+            {"id": item.employee_id, "version": item.version},
         )

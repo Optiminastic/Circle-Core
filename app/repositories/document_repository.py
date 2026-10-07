@@ -81,6 +81,20 @@ class SqlAlchemyDocumentRepository:
         except SQLAlchemyError as exc:
             raise RepositoryError(f"Failed to query '{table}'") from exc
 
+    def find_text_ci(self, table: str, field: str, value: str) -> list[Document]:
+        """Rows whose top-level text `field` equals `value` ignoring case and
+        surrounding spaces (e.g. an email typed with capitals)."""
+        try:
+            sql = (
+                f'SELECT data FROM "{table}" WHERE lower(trim(data->>:field)) = lower(trim(:value)) '
+                "ORDER BY created_at ASC"
+            )
+            params = {"field": field, "value": value}
+            rows = self._run(lambda: self._session.execute(text(sql), params).fetchall())
+            return [_as_dict(row[0]) for row in rows]
+        except SQLAlchemyError as exc:
+            raise RepositoryError(f"Failed to query '{table}'") from exc
+
     def count(self, table: str, match: Document | None = None) -> int:
         try:
             if match:

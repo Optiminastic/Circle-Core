@@ -94,6 +94,8 @@ Check stuck deliveries:
 
 ## Avora: pay, bank details and documents
 Avora's backend reads one employee at a time from `/api/internal/avora/*`, looked up by work email.
+Its `scheduler-circle-documents` worker copies each employee's documents into Avora once; nothing in Circle is ever deleted or changed.
+Files still on the employee's original candidate record (e.g. signed offer/appointment letters) are included.
 - Set `AVORA_API_SECRET` here and the same value as `CIRCLE_API_SECRET` in Avora.
 - It is deliberately a different secret from `INTERNAL_API_SECRET` (which id-sync holds).
 - Avora decides who sees what: pay only for HR/admin/payroll, documents only for HR/admin and the person.

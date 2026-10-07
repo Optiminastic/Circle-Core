@@ -30,23 +30,25 @@ from app.storage.base import FileStorage
 
 # Categories whose links must open WITHOUT a login, because they are handed to
 # people who have no Circle account: resumes (shared with interviewers),
-# exit-handover files (the departing employee's portal) and profile/welcome
-# photos (rendered as <img>, including in emails). Every other document - ID proofs, PAN,
+# exit-handover files (the departing employee's portal), take-home assignment
+# briefs (the public test page links them) and profile/welcome photos
+# (rendered as <img>, including in emails). Every other document - ID proofs, PAN,
 # Aadhaar, cancelled cheques, offer/appointment letters, BGV reports - needs a
 # dashboard session even when the id is known, so a forwarded or leaked link
 # exposes nothing sensitive.
-PUBLIC_VIEW_CATEGORIES = frozenset({"resume", "handover", "avatar", "Welcome Photo"})
+PUBLIC_VIEW_CATEGORIES = frozenset(
+    {"resume", "handover", "avatar", "Welcome Photo", "assignment-brief"}
+)
 
 
 def guard_documents(request: Request, settings: Settings = Depends(get_settings)) -> None:
-    """Public: the careers-apply resume upload (per-IP rate limited), and viewing
-    by id - which `_require_view_access` then narrows to PUBLIC_VIEW_CATEGORIES
-    for callers without a session. Listing, deleting and drive imports always
-    require a dashboard session."""
+    """Public: viewing by id only - which `_require_view_access` then narrows to
+    PUBLIC_VIEW_CATEGORIES for callers without a session. Uploading, listing,
+    deleting and drive imports require a dashboard session. (The careers form
+    uploads its resume through /api/public/apply, never through here: an open
+    upload let anyone attach a file to any employee or candidate.)"""
     method, path = request.method, request.url.path.rstrip("/")
     if method == "GET" and (path.endswith("/preview") or path.endswith("/url")):
-        return
-    if method == "POST" and path == "/api/documents":  # resume upload (apply flow)
         return
     if not read_session(settings, request.cookies.get(COOKIE_NAME)):
         raise HTTPException(status_code=401, detail="Authentication required. Please sign in.")
