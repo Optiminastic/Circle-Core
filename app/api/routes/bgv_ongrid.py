@@ -23,6 +23,7 @@ from app.api.dependencies import get_repository, get_storage, require_user
 from app.core.config import Settings, get_settings
 from app.core.errors import NotFoundError, ValidationError
 from app.core.logging import get_logger
+from app.api.routes.doc_requests import has_consent
 from app.repositories.base import DocumentRepository
 from app.services import bgv_checks
 from app.services.ongrid import GENDER_TO_ONGRID, OnGridClient, OnGridError
@@ -357,7 +358,7 @@ def ongrid_onboard(
 
     doc_request = _pick_doc_request(repo, candidate_id)
     consent = (doc_request or {}).get("consent") or {}
-    if not consent.get("agreed") or not str(consent.get("text") or "").strip():
+    if not has_consent(doc_request or {}):
         # OnGrid mandates consent (error 157 otherwise); we require the
         # candidate's recorded portal consent before sending any PII.
         return OnboardResult(ok=False, reason="no_consent")

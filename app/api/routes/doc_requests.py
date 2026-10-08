@@ -61,6 +61,28 @@ def _is_expired(request: dict[str, Any]) -> bool:
     return datetime.now(timezone.utc) > expires
 
 
+def has_consent(request: dict[str, Any]) -> bool:
+    """Has the candidate given the background-verification consent?
+
+    Both halves matter: `agreed` is the candidate's answer, and `text` is the
+    wording they agreed to, which is sent verbatim as OnGrid's `consentText`.
+    A tick with no recorded wording is not something we can stand behind.
+
+    Shared with the OnGrid onboard (`bgv_ongrid.ongrid_onboard`) so the portal
+    and the point of sharing cannot drift apart on what consent means.
+    """
+    consent = request.get("consent") or {}
+    return bool(consent.get("agreed")) and bool(str(consent.get("text") or "").strip())
+
+
+def needs_consent(request: dict[str, Any]) -> bool:
+    """An employee request is for someone already hired and already verified, so
+    there is no background verification to consent to. Everything else - including
+    every request created before `entityType` existed - is a candidate's joining
+    documents."""
+    return (request.get("entityType") or "candidate") != "employee"
+
+
 @router.post("/{token}/upload", status_code=201)
 async def upload_request_document(
     token: str,
@@ -75,6 +97,15 @@ async def upload_request_document(
         raise NotFoundError("This upload link is invalid.")
     if _is_expired(request):
         raise ValidationError("This upload link has expired. Please ask HR for a new one.")
+
+    # The portal tells the candidate their documents cannot be accepted without
+    # consent, and that has to hold for the API too, not just the UI - these
+    # documents exist to be shared with a verification partner who rejects a
+    # verification carrying no consent.
+    if needs_consent(request) and not has_consent(request):
+        raise ValidationError(
+            "Please tick the background-verification consent before uploading your documents."
+        )
 
     required = request.get("requiredDocs") or []
     if required and docType not in required:
