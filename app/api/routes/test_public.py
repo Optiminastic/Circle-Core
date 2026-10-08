@@ -179,8 +179,12 @@ def get_test(token: str, service: ResourceService = Depends(get_resource_service
         # (once submitted) what they uploaded back.
         "briefDocId": invite.get("briefDocId"),
         "briefFileName": invite.get("briefFileName"),
+        # Where to put work too large to upload here. Safe to echo: it is a
+        # folder HR deliberately opened for this candidate.
+        "driveUploadUrl": invite.get("driveUploadUrl"),
         "submissionDocId": invite.get("submissionDocId"),
         "submissionFileName": invite.get("submissionFileName"),
+        "submissionUrl": invite.get("submissionUrl"),
         # Result fields are only meaningful once finished; safe to echo then.
         "score": invite.get("score") if invite.get("status") in _TERMINAL else None,
         "passed": invite.get("passed") if invite.get("status") in _TERMINAL else None,
@@ -275,6 +279,68 @@ def submit(
     }
 
 
+def _take_home_open(invite: dict[str, Any]) -> None:
+    """Raise unless this invite is a take-home still accepting a submission.
+
+    Shared by both submission routes so a file and a link are governed by the
+    same rules - otherwise closing one door would leave the other open.
+    """
+    if invite.get("kind") != "take-home":
+        raise HTTPException(status_code=400, detail="This invite does not accept a submission.")
+    if invite.get("status") in _TAKE_HOME_TERMINAL:
+        raise HTTPException(status_code=409, detail="This assignment has already been submitted.")
+    deadline = invite.get("deadlineIso")
+    if not deadline:
+        return
+    try:
+        expired = datetime.now(timezone.utc) > datetime.fromisoformat(str(deadline))
+    except ValueError:
+        return
+    if expired:
+        raise HTTPException(
+            status_code=410, detail="The submission window for this assignment has closed."
+        )
+
+
+@router.post("/{token}/submit-link")
+def submit_link(
+    token: str,
+    payload: dict[str, Any] = Body(...),
+    service: ResourceService = Depends(get_resource_service),
+) -> dict[str, Any]:
+    """Take-home only: the candidate hands in a link instead of a file.
+
+    A video answer runs to several hundred MB, which is not worth moving
+    through the API and storing. They upload it to the Drive folder HR shared
+    and give us the link; the work lives there, and the invite records where.
+
+    Governed by the same window and write-once rules as the file route - the
+    way to submit must not change what the deadline means.
+    """
+    invite = _load(service, token)
+    _take_home_open(invite)
+
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Please paste the link to your work.")
+    if len(url) > 2000:
+        raise HTTPException(status_code=400, detail="That link is too long.")
+    # Only the two schemes a browser will open. Anything else - javascript:,
+    # data: - is a link HR would click from their dashboard.
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400, detail="Enter a full link starting with http:// or https://"
+        )
+
+    updated = service.patch(
+        get_resource(_INVITES),
+        token,
+        {"submissionUrl": url, "status": "Submitted", "completedAt": _now()},
+    )
+    logger.info("Take-home assignment %s submitted as a link", token)
+    return {"ok": True, "status": updated.get("status")}
+
+
 @router.post("/{token}/submit-file")
 async def submit_file(
     token: str,
@@ -292,18 +358,7 @@ async def submit_file(
     endpoint only records the file and moves the invite to 'Submitted'.
     """
     invite = _load(service, token)
-    if invite.get("kind") != "take-home":
-        raise HTTPException(status_code=400, detail="This invite does not accept a file submission.")
-    if invite.get("status") in _TAKE_HOME_TERMINAL:
-        raise HTTPException(status_code=409, detail="This assignment has already been submitted.")
-    deadline = invite.get("deadlineIso")
-    if deadline:
-        try:
-            expired = datetime.now(timezone.utc) > datetime.fromisoformat(str(deadline))
-        except ValueError:
-            expired = False
-        if expired:
-            raise HTTPException(status_code=410, detail="The submission window for this assignment has closed.")
+    _take_home_open(invite)
 
     data = await file.read()
     if not data:
