@@ -72,6 +72,9 @@ class OnboardResult(BaseModel):
     documents: list[dict[str, Any]] = []
     response: dict[str, Any] | None = None
     reason: str | None = None
+    #: True when this landed on the candidate's existing OnGrid individual
+    #: instead of creating one, so HR can see a retry did not duplicate them.
+    reused: bool = False
 
 
 class ClaimDetails(BaseModel):
@@ -382,17 +385,39 @@ def ongrid_onboard(
 
     client = OnGridClient(settings)
 
-    # 1) Create (onboard-only) the individual.
-    try:
-        created = client.create_individual(payload)
-    except OnGridError as exc:
-        logger.warning("OnGrid create failed for candidate %s: %s", candidate_id, exc)
-        return OnboardResult(ok=False, reason=str(exc))
+    bgv = repo.get(BGVS, candidate_id) or {
+        "id": candidate_id,
+        "candidateId": candidate_id,
+        "candidateName": candidate.get("fullName"),
+        "appliedRole": candidate.get("appliedRole"),
+        "documents": [],
+        "overallStatus": "Pending",
+        "verificationTimeline": [],
+    }
 
-    individual = created.get("individual") or created
-    individual_id = str(individual.get("id") or "")
-    if not individual_id:
-        return OnboardResult(ok=False, reason="OnGrid did not return an individual id.")
+    # 1) Create (onboard-only) the individual — unless this candidate already
+    #    has one. A second create does not update the first, it forks it:
+    #    OnGrid mints a new id, we would overwrite ours, and any check already
+    #    running against the original goes invisible here while OnGrid keeps
+    #    billing for it. HR retries this whenever a document failed to upload,
+    #    which is precisely when the retry has to land on the same individual.
+    existing_id = str(bgv.get("ongridIndividualId") or "")
+    reused = bool(existing_id)
+    if reused:
+        individual_id = existing_id
+        individual = dict(bgv.get("ongridResponse") or {"id": existing_id})
+        logger.info("OnGrid re-onboard for candidate %s reusing individual", candidate_id)
+    else:
+        try:
+            created = client.create_individual(payload)
+        except OnGridError as exc:
+            logger.warning("OnGrid create failed for candidate %s: %s", candidate_id, exc)
+            return OnboardResult(ok=False, reason=str(exc))
+
+        individual = created.get("individual") or created
+        individual_id = str(individual.get("id") or "")
+        if not individual_id:
+            return OnboardResult(ok=False, reason="OnGrid did not return an individual id.")
 
     # 2) Upload each accepted document image.
     doc_results: list[dict[str, Any]] = []
@@ -435,26 +460,21 @@ def ongrid_onboard(
         "gender": individual.get("gender"),
         "currentAddress": individual.get("currentAddress"),
     }
-    bgv = repo.get(BGVS, candidate_id) or {
-        "id": candidate_id,
-        "candidateId": candidate_id,
-        "candidateName": candidate.get("fullName"),
-        "appliedRole": candidate.get("appliedRole"),
-        "documents": [],
-        "overallStatus": "Pending",
-        "verificationTimeline": [],
-    }
     bgv["ongridIndividualId"] = individual_id
     bgv["ongridOnboardedAt"] = _now()
     bgv["ongridResponse"] = trimmed
     bgv["ongridDocuments"] = doc_results
     timeline = list(bgv.get("verificationTimeline") or [])
     uploaded = sum(1 for d in doc_results if d["status"] == "uploaded")
+    opened = (
+        f"Re-sent documents to OnGrid (existing individual {individual_id})"
+        if reused
+        else f"Onboarded to OnGrid (individual {individual_id})"
+    )
     timeline.append(
         {
             "date": _now(),
-            "action": f"Onboarded to OnGrid (individual {individual_id}); "
-            f"{uploaded}/{len(doc_results)} documents uploaded",
+            "action": f"{opened}; {uploaded}/{len(doc_results)} documents uploaded",
             "performedBy": "HR",
         }
     )
@@ -462,5 +482,9 @@ def ongrid_onboard(
     repo.upsert(BGVS, candidate_id, bgv)
 
     return OnboardResult(
-        ok=True, individualId=individual_id, documents=doc_results, response=trimmed
+        ok=True,
+        individualId=individual_id,
+        documents=doc_results,
+        response=trimmed,
+        reused=reused,
     )
