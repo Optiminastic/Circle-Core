@@ -156,3 +156,66 @@ def test_an_unconfigured_server_does_not_reach_ongrid(client: Any) -> None:
     assert result.ok is False
     assert result.reason == "not_configured"
     assert client.created == []
+
+
+# --------------------------------------------------------------------------
+# An individual id means something only inside the community it was made in.
+# The same number is a different person in staging and in production, so
+# reading one across the boundary does not fail - it answers about a stranger.
+# --------------------------------------------------------------------------
+
+
+def _settings_for(community: str) -> Any:
+    from app.core.config import Settings
+
+    return Settings(
+        ongrid_username="user", ongrid_password="secret", ongrid_community_id=community
+    )
+
+
+@pytest.mark.parametrize(
+    "stored,configured,expected",
+    [
+        ("187363", "187363", True),
+        ("79355", "187363", False),  # staging id, production credentials
+        ("", "187363", False),  # written before the community was stamped
+    ],
+)
+def test_which_records_belong_here(stored: str, configured: str, expected: bool) -> None:
+    assert (
+        bgv_ongrid.belongs_here({"ongridCommunityId": stored}, _settings_for(configured))
+        is expected
+    )
+
+
+def test_status_refuses_to_read_a_foreign_individual(client: Any) -> None:
+    repo = _Repo({"id": CANDIDATE_ID, "ongridIndividualId": "191569", "ongridCommunityId": "79355"})
+    result = bgv_ongrid.ongrid_status(
+        candidate_id=CANDIDATE_ID,
+        settings=_settings_for("187363"),
+        repo=repo,  # type: ignore[arg-type]
+    )
+    assert result.ok is False
+    assert result.reason == bgv_ongrid.FOREIGN_COMMUNITY
+    assert result.individualId == "191569"
+
+
+def test_verify_refuses_rather_than_billing_checks_on_a_stranger(client: Any) -> None:
+    repo = _Repo({"id": CANDIDATE_ID, "ongridIndividualId": "191569", "ongridCommunityId": "79355"})
+    result = bgv_ongrid.ongrid_verify(
+        candidate_id=CANDIDATE_ID,
+        body=bgv_ongrid.VerifyRequest(services=["PANV"]),
+        settings=_settings_for("187363"),
+        repo=repo,  # type: ignore[arg-type]
+        storage=_Storage(),  # type: ignore[arg-type]
+    )
+    assert result.ok is False
+    assert result.reason == bgv_ongrid.FOREIGN_COMMUNITY
+
+
+def test_an_onboard_stamps_the_community_it_created_the_individual_in(client: Any) -> None:
+    repo = _Repo(None)
+    _onboard(repo)
+    stored = repo.rows[bgv_ongrid.BGVS]
+    assert stored["ongridCommunityId"] == "187363"
+    assert bgv_ongrid.belongs_here(stored, _settings_for("187363")) is True

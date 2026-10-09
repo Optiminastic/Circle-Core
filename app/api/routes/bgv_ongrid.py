@@ -197,6 +197,23 @@ def _candidate_data(
     )
 
 
+#: A record carrying no community predates the stamp. It cannot be shown to
+#: belong here, and an id from somewhere else is not merely stale - OnGrid may
+#: well have an individual under that number, and it will be a different person.
+#: So an unstamped record is treated as foreign rather than assumed to be ours.
+FOREIGN_COMMUNITY = "different_ongrid_community"
+
+
+def belongs_here(bgv: dict[str, Any], settings: Settings) -> bool:
+    """Was this individual created in the community we are configured for?
+
+    Individual ids are per community, so the same number means different people
+    in staging and in production. Reading one across the boundary does not fail
+    loudly - it quietly answers about somebody else.
+    """
+    return str(bgv.get("ongridCommunityId") or "") == str(settings.ongrid_community_id or "")
+
+
 class StatusResult(BaseModel):
     ok: bool
     individualId: str | None = None
@@ -227,6 +244,10 @@ def ongrid_status(
     individual_id = str(bgv.get("ongridIndividualId") or "")
     if not individual_id:
         return StatusResult(ok=False, reason="not_onboarded")
+    if not belongs_here(bgv, settings):
+        # Asking anyway would return whoever holds that id in this community.
+        logger.info("OnGrid status skipped for candidate %s: foreign community", candidate_id)
+        return StatusResult(ok=False, individualId=individual_id, reason=FOREIGN_COMMUNITY)
 
     client = OnGridClient(settings)
     try:
@@ -293,6 +314,11 @@ def ongrid_verify(
     if not individual_id:
         # The individual must exist before any check can reference it.
         return VerifyResult(ok=False, reason="not_onboarded")
+    if not belongs_here(bgv, settings):
+        # Worse than a stale read: this would start, and bill, real checks
+        # against whoever holds that id in the community we are pointed at.
+        logger.warning("OnGrid verify refused for candidate %s: foreign community", candidate_id)
+        return VerifyResult(ok=False, reason=FOREIGN_COMMUNITY)
 
     data = _candidate_data(repo, storage, candidate_id, settings, body.details)
 
@@ -461,6 +487,10 @@ def ongrid_onboard(
         "currentAddress": individual.get("currentAddress"),
     }
     bgv["ongridIndividualId"] = individual_id
+    # Which OnGrid this id means something in. Without it, a change of
+    # environment turns every stored id into a pointer at a stranger.
+    bgv["ongridCommunityId"] = str(settings.ongrid_community_id or "")
+    bgv["ongridBaseUrl"] = settings.ongrid_base_url
     bgv["ongridOnboardedAt"] = _now()
     bgv["ongridResponse"] = trimmed
     bgv["ongridDocuments"] = doc_results
