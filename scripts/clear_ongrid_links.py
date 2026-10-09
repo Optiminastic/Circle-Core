@@ -83,15 +83,22 @@ def main() -> None:
     engine = create_engine(settings.sqlalchemy_url)
     cleared = 0
     skipped = 0
+    # Every community seen, so the run can be checked against what is expected
+    # rather than trusted. The one candidate somebody noticed is rarely the
+    # only one affected.
+    seen: dict[str, int] = {}
     with engine.begin() as conn:
         rows = conn.execute(text("SELECT id, data FROM bgvs")).fetchall()
+        print("%d BGV record(s) in the database." % len(rows))
+        print()
         for row_id, data in rows:
             record: dict[str, Any] = data if isinstance(data, dict) else json.loads(data or "{}")
             individual = str(record.get("ongridIndividualId") or "")
             if not individual:
                 continue
 
-            community = str(record.get("ongridCommunityId") or "")
+            community = str(record.get("ongridCommunityId") or "") or "(unstamped)"
+            seen[community] = seen.get(community, 0) + 1
             target = args.community
             stale = community == target if target else community != keep
             if not stale:
@@ -99,7 +106,11 @@ def main() -> None:
                 continue
 
             name = record.get("candidateName") or row_id
-            where = community or "unstamped (pre-dates the community field)"
+            where = (
+                "staging or pre-dates the community field"
+                if community == "(unstamped)"
+                else "community " + community
+            )
             print(f"  {name}: individual {individual} from {where}")
 
             if args.apply:
@@ -124,6 +135,11 @@ def main() -> None:
             cleared += 1
 
     engine.dispose()
+    print()
+    print("linked to an OnGrid individual, by community:")
+    for community, count in sorted(seen.items()):
+        print("  %-14s %d%s" % (community, count, "  <- this one" if community == keep else ""))
+
     verb = "cleared" if args.apply else "would clear"
     print(f"\n{verb} {cleared} record(s); left {skipped} belonging to community {keep}.")
     if cleared and not args.apply:
