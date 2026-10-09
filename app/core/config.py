@@ -107,6 +107,19 @@ class Settings(BaseSettings):
     vapi_base_url: str = "https://api.vapi.ai"
     vapi_phone_number_id: str = ""
     vapi_webhook_secret: str = ""
+    # Signature authentication, preferred over the shared secret above. Set
+    # these to match the HMAC credential attached to the server URL in Vapi:
+    # the secret never crosses the wire, the signature covers the body, and the
+    # timestamp bounds how long a captured request stays usable. Blank falls
+    # back to the shared secret, so the two can be switched over without
+    # downtime. SHA-256 only - Vapi also offers SHA-1, which is not a choice
+    # worth having for something that writes a verdict onto a candidate.
+    vapi_webhook_signing_secret: str = ""
+    vapi_webhook_signature_header: str = "x-signature"
+    # Vapi's payload format setting: with a timestamp header the signature
+    # covers "{timestamp}.{body}", without one it covers the body alone. Blank
+    # means the body-only format and gives up replay protection.
+    vapi_webhook_timestamp_header: str = "x-timestamp"
     vapi_llm_provider: str = "openai"
     vapi_llm_model: str = "gpt-4o-mini"
     # Public URL Vapi posts call events to, e.g.
