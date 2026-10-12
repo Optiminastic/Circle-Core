@@ -33,6 +33,7 @@ from app.api.routes import (
     notifications,
     public,
     resources,
+    sarvam_webhook,
     screening_calls,
     test_public,
     vapi_webhook,
@@ -294,6 +295,7 @@ def create_app() -> FastAPI:
     # generic /api/{resource} router.
     app.include_router(screening_calls.router)
     app.include_router(vapi_webhook.router)
+    app.include_router(sarvam_webhook.router)
     app.include_router(employee_codes.router)
     # Server-to-server pay/bank/documents for Avora (own secret). Literal
     # /api/internal/avora/* paths, before the generic /api/{resource} router.
