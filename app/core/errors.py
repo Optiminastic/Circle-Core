@@ -68,12 +68,23 @@ class StorageError(AppError):
     code = "storage_error"
 
 
+#: What a 5xx tells whoever is on the page. The real detail names tables,
+#: record ids and environment variables - "Failed to save 'doc_requests/<token>'",
+#: "Set the AWS_* env vars and restart". That belongs in the log, not in front
+#: of a candidate halfway through uploading their documents. A 4xx detail is
+#: written for them and is kept.
+SERVER_ERROR_DETAIL = "Something went wrong on our side. Please try again in a moment."
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _handle_app_error(_: Request, exc: AppError) -> JSONResponse:
+        detail = exc.detail
         if exc.status_code >= 500:
-            logger.exception("AppError: %s", exc.detail)
-        return JSONResponse(status_code=exc.status_code, content={"error": exc.code, "detail": exc.detail})
+            # Logged in full, answered in general.
+            logger.exception("AppError: %s", detail)
+            detail = SERVER_ERROR_DETAIL
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.code, "detail": detail})
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(_: Request, exc: Exception) -> JSONResponse:
