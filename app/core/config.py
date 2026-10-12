@@ -120,6 +120,29 @@ class Settings(BaseSettings):
     # covers "{timestamp}.{body}", without one it covers the body alone. Blank
     # means the body-only format and gives up replay protection.
     vapi_webhook_timestamp_header: str = "x-timestamp"
+    # AI screening calls through Sarvam (app/services/sarvam_calls.py). Sarvam
+    # runs the whole call - the agent lives in their workspace and holds its
+    # own script, so nothing here builds a prompt and there is no speech
+    # bridge. One POST places one call; Sarvam reports the result back.
+    sarvam_api_key: str = ""
+    sarvam_base_url: str = "https://apps.sarvam.ai/api"
+    sarvam_org_id: str = ""
+    sarvam_workspace_id: str = ""
+    # The agent to run, and a COMMITTED version - never the draft, which can
+    # change underneath a call that is already in progress.
+    sarvam_app_id: str = ""
+    sarvam_app_version: int = 0
+    # Which telephony connection to dial from, and the number the candidate
+    # sees. Both come from the workspace's telephony settings.
+    sarvam_connection_id: str = ""
+    sarvam_agent_phone_number: str = ""
+    # Sarvam does not sign its webhook, so the URL carries the secret: the
+    # route is /api/sarvam/webhook/{token} and only this value opens it. An
+    # event is then accepted only for an attempt id we placed ourselves.
+    sarvam_webhook_token: str = ""
+    # Public base this API answers on, used to build the webhook URL sent with
+    # each call, e.g. https://api.circle.optiminastic.com
+    sarvam_webhook_base_url: str = ""
     vapi_llm_provider: str = "openai"
     vapi_llm_model: str = "gpt-4o-mini"
     # Public URL Vapi posts call events to, e.g.
@@ -297,6 +320,20 @@ class Settings(BaseSettings):
         return bool(
             self.ongrid_username and self.ongrid_password and self.ongrid_community_id
         )
+
+    @property
+    def has_sarvam_calls(self) -> bool:
+        """Everything an outbound call needs. Missing any of it = 503, never a
+        half-configured call that fails at the provider."""
+        return all(
+            value.strip()
+            for value in (
+                self.sarvam_api_key, self.sarvam_org_id, self.sarvam_workspace_id,
+                self.sarvam_app_id, self.sarvam_connection_id,
+                self.sarvam_agent_phone_number, self.sarvam_webhook_token,
+                self.sarvam_webhook_base_url,
+            )
+        ) and self.sarvam_app_version > 0
 
     @property
     def has_vapi(self) -> bool:
