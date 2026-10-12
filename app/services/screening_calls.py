@@ -127,13 +127,25 @@ class ScreeningCallService:
 
         call = self._new_call(candidate, job, questions, mode, actor)
         self._repo.upsert(TABLE, call["id"], call)
-        assistant = build_screening_assistant(
-            screening_call_id=call["id"],
-            candidate_name=str(candidate.get("fullName") or ""),
-            job_title=str(job.get("title") or ""),
-            questions=questions,
-            settings=settings,
-        )
+        # Transition seam while two providers exist: one is handed the facts
+        # and shapes its own request, the other needs an assistant assembled
+        # for it. Goes away with whichever provider is retired.
+        build_payload = getattr(provider, "build_payload", None)
+        if callable(build_payload):
+            assistant = build_payload(
+                screening_call_id=call["id"],
+                candidate_name=str(candidate.get("fullName") or ""),
+                job_title=str(job.get("title") or ""),
+                questions=questions,
+            )
+        else:
+            assistant = build_screening_assistant(
+                screening_call_id=call["id"],
+                candidate_name=str(candidate.get("fullName") or ""),
+                job_title=str(job.get("title") or ""),
+                questions=questions,
+                settings=settings,  # type: ignore[arg-type]
+            )
         created = self._place_call(call, provider, assistant, to_number)
         call = self._bind_provider_call(call, created)
         self._record("screening_call.started", f"Started AI screening call ({mode})", call, actor)
@@ -143,11 +155,15 @@ class ScreeningCallService:
         calls = self._repo.find(TABLE, {"candidateId": candidate_id})
         return sorted(calls, key=lambda c: c.get("startedAt") or "", reverse=True)
 
-    def _require_configured(self, mode: CallMode) -> tuple[VoiceCallProvider, AssistantSettings]:
-        if self._provider is None or self._assistant_settings is None:
+    def _require_configured(self, mode: CallMode) -> tuple[VoiceCallProvider, AssistantSettings | None]:
+        # A provider that builds its own payload carries its own settings and
+        # needs none here - Sarvam's agent holds the prompt, so there is
+        # nothing for this service to assemble.
+        needs_assistant = not hasattr(self._provider, "build_payload")
+        if self._provider is None or (needs_assistant and self._assistant_settings is None):
             raise CallingNotConfigured("AI screening calls are not configured")
         if mode == "phone" and not self._phone_enabled:
-            raise CallingNotConfigured("Phone calls are not set up yet - use the browser test call")
+            raise CallingNotConfigured("Phone calls are not set up yet")
         return self._provider, self._assistant_settings
 
     def _phone_for(self, candidate: dict[str, Any]) -> str:
@@ -175,7 +191,14 @@ class ScreeningCallService:
         merge into the current row instead of writing our stale copy back.
         """
         current = self._repo.get(TABLE, call["id"]) or call
-        current.update(vapiCallId=created.provider_call_id, webCallUrl=created.web_call_url)
+        # Both names: `providerCallId` is the provider-neutral one every new
+        # row carries, `vapiCallId` stays so rows written before there was a
+        # second provider still resolve.
+        current.update(
+            providerCallId=created.provider_call_id,
+            vapiCallId=created.provider_call_id,
+            webCallUrl=created.web_call_url,
+        )
         self._repo.upsert(TABLE, current["id"], current)
         return current
 
@@ -193,6 +216,7 @@ class ScreeningCallService:
             "jobId": job.get("id"),
             "mode": mode,
             "status": QUEUED,
+            "providerCallId": None,
             "vapiCallId": None,
             "webCallUrl": None,
             "questions": questions,
@@ -240,6 +264,67 @@ class ScreeningCallService:
             self._apply_report(call, message)
             return True
         return False
+
+    def apply_sarvam_event(self, payload: dict[str, Any]) -> bool:
+        """Apply one Sarvam call result. False when it was ignored.
+
+        Sarvam reports once, when the call ends - there are no progress
+        events - so this is the whole lifecycle after dialling.
+
+        The call is found by the `attempt_id` we were given when we placed it,
+        and only by that. The screeningCallId echoed back in metadata is used
+        to confirm the match, never to find a call: the webhook is unsigned,
+        so accepting an id supplied by the caller would let anyone write a
+        verdict onto any candidate.
+        """
+        from app.services import sarvam_results
+
+        attempt_id = str(payload.get("attempt_id") or "")
+        if not attempt_id:
+            return False
+        matches = self._repo.find(TABLE, {"providerCallId": attempt_id})
+        if not matches:
+            return False
+        call = matches[0]
+        if call.get("status") in TERMINAL_STATUSES:
+            return False  # already reported; a repeat is a replay
+
+        claimed = _sarvam_metadata_call_id(payload)
+        if claimed and claimed != call["id"]:
+            logger.warning("Sarvam event for %s claims a different call", attempt_id)
+            return False
+
+        variables = payload.get("final_agent_variables")
+        status = sarvam_results.outcome_status(variables, sarvam_results.call_status(payload))
+        call.update(
+            endedAt=_iso(self._clock()),
+            endedReason=_text(payload.get("failure_reason"), _MAX_REASON_CHARS),
+            durationSeconds=_number(payload.get("duration")),
+            transcript=sarvam_results.transcript_text(payload, limit=_MAX_TRANSCRIPT_CHARS),
+            interactionId=_text(payload.get("interaction_id"), 128),
+            status=status,
+        )
+        # Only a connected call that actually reached the candidate has
+        # anything to score; the rest keep the status above.
+        if status == COMPLETED:
+            self._score(
+                call,
+                sarvam_results.to_structured_data(
+                    variables, question_count=len(call.get("questions") or [])
+                ),
+            )
+            summary = _text((variables or {}).get("call_summary"), 2000) if isinstance(variables, dict) else None
+            if summary:
+                call["summary"] = summary
+        self._repo.upsert(TABLE, call["id"], call)
+        self._record(
+            "screening_call.completed",
+            f"AI screening call ended: {call['status']}",
+            call,
+            actor=None,
+            extra={"fitRating": call.get("fitRating")},
+        )
+        return True
 
     def _find_call(self, provider_call: Any) -> dict[str, Any] | None:
         if not isinstance(provider_call, dict):
@@ -349,3 +434,11 @@ def _number(value: Any) -> float | None:
 
 def _text(value: Any, limit: int) -> str | None:
     return value[:limit] if isinstance(value, str) else None
+
+
+def _sarvam_metadata_call_id(payload: dict[str, Any]) -> str:
+    """Our own id, echoed back by Sarvam in the webhook config."""
+    config = payload.get("webhook_config")
+    metadata = config.get("metadata") if isinstance(config, dict) else None
+    value = metadata.get("screeningCallId") if isinstance(metadata, dict) else None
+    return value if isinstance(value, str) else ""
