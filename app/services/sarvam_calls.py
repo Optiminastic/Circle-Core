@@ -55,6 +55,9 @@ class SarvamCallSettings:
 #: silently renumbered into a question it has no output variable for.
 MAX_QUESTIONS = 10
 
+#: Enough to make a follow-up specific; a longer list is a recital.
+MAX_KEYWORDS = 8
+
 #: Outputs the agent declares as needing an initial value. Sent empty.
 _REQUIRED_EMPTY = (
     "call_summary",
@@ -90,6 +93,69 @@ def format_questions(questions: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def candidate_context(candidate: dict[str, Any]) -> dict[str, str]:
+    """What Circle already knows, as the three variables the agent declares.
+
+    Composed from the structured fields rather than the resume text: Circle
+    has no model to summarise with, and a truncated run of PDF text is worse
+    than nothing for something that will be read by an agent mid-call.
+
+    Anything unknown comes back as an empty string, which the prompt treats as
+    unknown and passes over in silence. A fresher has no company and no years,
+    and must not be made to sound like a gap.
+    """
+    total = _years(candidate.get("totalExperienceYears"))
+    relevant = _years(candidate.get("relevantExperienceYears"))
+    if total and relevant and relevant != total:
+        experience = f"{total} total, {relevant} relevant to this role"
+    else:
+        experience = total or relevant or ""
+
+    notice = candidate.get("noticePeriodDays")
+    if isinstance(notice, (int, float)) and notice > 0:
+        notice_period = f"{int(notice)} days"
+    elif isinstance(notice, (int, float)):
+        notice_period = "available immediately"
+    else:
+        notice_period = ""
+
+    return {
+        "experience": experience,
+        "notice_period": notice_period,
+        "candidate_background": _background(candidate),
+    }
+
+
+def _years(value: Any) -> str:
+    if not isinstance(value, (int, float)) or value <= 0:
+        return ""
+    whole = int(value)
+    return f"{whole} year" if whole == 1 else f"{whole} years"
+
+
+def _background(candidate: dict[str, Any]) -> str:
+    """Current role and the skills actually found in their resume.
+
+    `keywordMatches` is the job's own keywords found in the resume text, so it
+    is already the relevant subset rather than everything they have ever
+    written down.
+    """
+    parts: list[str] = []
+    designation = str(candidate.get("currentDesignation") or "").strip()
+    company = str(candidate.get("currentCompany") or "").strip()
+    if designation and company:
+        parts.append(f"Currently {designation} at {company}")
+    elif designation:
+        parts.append(f"Currently {designation}")
+    elif company:
+        parts.append(f"Currently at {company}")
+
+    matches = [str(k).strip() for k in (candidate.get("keywordMatches") or []) if str(k).strip()]
+    if matches:
+        parts.append("their resume mentions " + ", ".join(matches[:MAX_KEYWORDS]))
+    return ". ".join(parts) + ("." if parts else "")
+
+
 class SarvamCallProvider:
     """Implements `VoiceCallProvider` over Sarvam Instant Outbound."""
 
@@ -103,7 +169,7 @@ class SarvamCallProvider:
         self,
         *,
         screening_call_id: str,
-        candidate_name: str,
+        candidate: dict[str, Any],
         job_title: str,
         questions: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -121,9 +187,10 @@ class SarvamCallProvider:
         is which record the result belongs to.
         """
         variables: dict[str, Any] = {
-            "user_name": _first_name(candidate_name),
+            "user_name": _first_name(str(candidate.get("fullName") or "")),
             "job_title": job_title.strip(),
             "questions": format_questions(questions),
+            **candidate_context(candidate),
         }
         # The agent marks its own outputs `needs_initial_value`, so they are
         # sent empty and come back filled.
