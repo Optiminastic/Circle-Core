@@ -37,19 +37,29 @@ DOC_REQUEST = {
 
 
 class _Repo:
-    def __init__(self, bgv: dict[str, Any] | None) -> None:
+    def __init__(
+        self,
+        bgv: dict[str, Any] | None,
+        *,
+        doc_request: dict[str, Any] | None = None,
+        documents: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
         if bgv is not None:
             self.rows[bgv_ongrid.BGVS] = bgv
+        self.doc_request = doc_request or DOC_REQUEST
+        self.documents = documents or {}
         self.writes: list[dict[str, Any]] = []
 
     def get(self, table: str, key: str) -> dict[str, Any] | None:
         if table == bgv_ongrid.CANDIDATES:
             return dict(CANDIDATE)
+        if table == bgv_ongrid.DOCUMENTS:
+            return self.documents.get(key)
         return self.rows.get(table)
 
     def list(self, table: str) -> list[dict[str, Any]]:
-        return [dict(DOC_REQUEST)] if table == bgv_ongrid.DOC_REQUESTS else []
+        return [dict(self.doc_request)] if table == bgv_ongrid.DOC_REQUESTS else []
 
     def upsert(self, table: str, key: str, data: dict[str, Any]) -> dict[str, Any]:
         self.rows[table] = data
@@ -66,6 +76,9 @@ class _FakeClient:
     """Records what the route asked OnGrid to do."""
 
     created: list[dict[str, Any]] = []
+    #: Which individual each document was attached to. The id is the whole
+    #: point: an upload aimed at the wrong one lands on another person.
+    uploaded_to: list[str] = []
 
     def __init__(self, settings: Any) -> None:
         pass
@@ -74,13 +87,15 @@ class _FakeClient:
         _FakeClient.created.append(payload)
         return {"individual": {"id": "ind-fresh", "name": payload.get("name")}}
 
-    def upload_document(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    def upload_document(self, individual_id: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        _FakeClient.uploaded_to.append(individual_id)
         return {}
 
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Any:
     _FakeClient.created = []
+    _FakeClient.uploaded_to = []
     monkeypatch.setattr(bgv_ongrid, "OnGridClient", _FakeClient)
     return _FakeClient
 
@@ -114,8 +129,18 @@ def test_a_first_onboard_creates_the_individual(client: Any) -> None:
     assert len(client.created) == 1
 
 
+def _ours(**extra: Any) -> dict[str, Any]:
+    """A BGV already onboarded into the community we are configured for."""
+    return {
+        "id": CANDIDATE_ID,
+        "ongridIndividualId": INDIVIDUAL_ID,
+        "ongridCommunityId": "187363",
+        **extra,
+    }
+
+
 def test_a_second_onboard_reuses_the_one_the_candidate_has(client: Any) -> None:
-    repo = _Repo({"id": CANDIDATE_ID, "ongridIndividualId": INDIVIDUAL_ID})
+    repo = _Repo(_ours())
     result = _onboard(repo)
 
     assert result.ok is True
@@ -127,7 +152,7 @@ def test_a_second_onboard_reuses_the_one_the_candidate_has(client: Any) -> None:
 def test_the_stored_individual_id_survives_a_retry(client: Any) -> None:
     # The real damage of a fork is here: the record stops pointing at the
     # individual the running checks belong to.
-    repo = _Repo({"id": CANDIDATE_ID, "ongridIndividualId": INDIVIDUAL_ID})
+    repo = _Repo(_ours())
     _onboard(repo)
 
     assert repo.rows[bgv_ongrid.BGVS]["ongridIndividualId"] == INDIVIDUAL_ID
@@ -138,7 +163,7 @@ def test_the_timeline_says_which_of_the_two_happened(client: Any) -> None:
     _onboard(fresh)
     assert "Onboarded to OnGrid" in fresh.rows[bgv_ongrid.BGVS]["verificationTimeline"][-1]["action"]
 
-    again = _Repo({"id": CANDIDATE_ID, "ongridIndividualId": INDIVIDUAL_ID})
+    again = _Repo(_ours())
     _onboard(again)
     assert "existing individual" in again.rows[bgv_ongrid.BGVS]["verificationTimeline"][-1]["action"]
 
@@ -219,3 +244,82 @@ def test_an_onboard_stamps_the_community_it_created_the_individual_in(client: An
     stored = repo.rows[bgv_ongrid.BGVS]
     assert stored["ongridCommunityId"] == "187363"
     assert bgv_ongrid.belongs_here(stored, _settings_for("187363")) is True
+
+
+# -- an id from another community names a different person --------------------
+#
+# Individual ids are minted per community, so 193781 in staging and 193781 in
+# production are two unrelated people. Reusing a stored id across that boundary
+# does not fail loudly: it uploads this candidate's Aadhaar and PAN onto
+# whoever happens to hold that number in the community we are now pointed at.
+
+
+STAGING = {"id": CANDIDATE_ID, "ongridIndividualId": "193781", "ongridCommunityId": "79355"}
+
+SUBMITTED_DOC_REQUEST = {
+    **DOC_REQUEST,
+    "submissions": [{"docType": "aadhaar", "status": "Verified", "documentId": "doc-1"}],
+}
+DOC_META = {"doc-1": {"storageKey": "k", "fileName": "aadhaar.pdf", "contentType": "application/pdf"}}
+
+
+def test_an_individual_from_another_community_is_never_reused(client: Any) -> None:
+    repo = _Repo(dict(STAGING))
+    result = _onboard(repo)
+
+    assert result.reused is False
+    assert result.individualId == "ind-fresh"
+    assert len(client.created) == 1, "a foreign id means there is nobody here yet"
+
+
+def test_documents_go_to_the_new_individual_not_the_foreign_one(client: Any) -> None:
+    # The whole point of the guard. Before it, these uploads were addressed to
+    # 193781 in the live community - a stranger.
+    repo = _Repo(dict(STAGING), doc_request=SUBMITTED_DOC_REQUEST, documents=DOC_META)
+    _onboard(repo)
+
+    assert client.uploaded_to == ["ind-fresh"]
+    assert "193781" not in client.uploaded_to
+
+
+def test_an_unstamped_individual_is_not_reused_either(client: Any) -> None:
+    # Every record predating the stamp was created while Circle pointed at
+    # staging, so "unknown community" is in practice "not this one".
+    repo = _Repo({"id": CANDIDATE_ID, "ongridIndividualId": "193781"})
+    result = _onboard(repo)
+
+    assert result.reused is False
+    assert len(client.created) == 1
+
+
+def test_the_abandoned_individual_is_kept_for_the_erasure_request(client: Any) -> None:
+    # Dropping it would erase the only record that this candidate was run in
+    # another community, and that community still has to be asked to delete it.
+    repo = _Repo(dict(STAGING))
+    _onboard(repo)
+    stored = repo.rows[bgv_ongrid.BGVS]
+
+    assert stored["ongridPreviousIndividualId"] == "193781"
+    assert stored["ongridPreviousCommunityId"] == "79355"
+    assert stored["ongridIndividualId"] == "ind-fresh"
+    assert stored["ongridCommunityId"] == "187363"
+
+
+def test_the_foreign_individuals_cached_status_is_not_shown_against_the_new_one(
+    client: Any,
+) -> None:
+    repo = _Repo(dict(STAGING, ongridStatus={"overall": "Clear"}, ongridStatusAt="2026-10-01T00:00:00Z"))
+    _onboard(repo)
+    stored = repo.rows[bgv_ongrid.BGVS]
+
+    assert "ongridStatus" not in stored, "a verdict from staging must not read as this one's"
+    assert "ongridStatusAt" not in stored
+
+
+def test_the_timeline_explains_why_a_new_number_appeared(client: Any) -> None:
+    repo = _Repo(dict(STAGING))
+    _onboard(repo)
+    action = repo.rows[bgv_ongrid.BGVS]["verificationTimeline"][-1]["action"]
+
+    assert "193781" in action and "79355" in action
+    assert "not reused" in action

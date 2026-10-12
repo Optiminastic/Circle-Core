@@ -427,13 +427,27 @@ def ongrid_onboard(
     #    running against the original goes invisible here while OnGrid keeps
     #    billing for it. HR retries this whenever a document failed to upload,
     #    which is precisely when the retry has to land on the same individual.
+    #    That reasoning only holds inside one community. An id stamped against
+    #    a different one names a different person here, so reusing it would
+    #    upload this candidate's identity documents onto a stranger's record.
+    #    A foreign id is therefore not reused - it is set aside and a real
+    #    individual is created in the community we are actually pointed at.
     existing_id = str(bgv.get("ongridIndividualId") or "")
-    reused = bool(existing_id)
+    foreign_id = "" if belongs_here(bgv, settings) else existing_id
+    # Read before the stamp below overwrites it with the current community.
+    foreign_community = str(bgv.get("ongridCommunityId") or "") if foreign_id else ""
+    reused = bool(existing_id) and not foreign_id
     if reused:
         individual_id = existing_id
         individual = dict(bgv.get("ongridResponse") or {"id": existing_id})
         logger.info("OnGrid re-onboard for candidate %s reusing individual", candidate_id)
     else:
+        if foreign_id:
+            logger.info(
+                "OnGrid onboard for candidate %s ignoring individual from community %s",
+                candidate_id,
+                bgv.get("ongridCommunityId") or "(unstamped)",
+            )
         try:
             created = client.create_individual(payload)
         except OnGridError as exc:
@@ -494,13 +508,28 @@ def ongrid_onboard(
     bgv["ongridOnboardedAt"] = _now()
     bgv["ongridResponse"] = trimmed
     bgv["ongridDocuments"] = doc_results
+    if foreign_id:
+        # The abandoned id is kept, not dropped: it is the only record that
+        # this candidate was run somewhere else, and the erasure request to
+        # that community needs the number.
+        bgv["ongridPreviousIndividualId"] = foreign_id
+        bgv["ongridPreviousCommunityId"] = foreign_community
+        # The cached status belongs to the abandoned individual. Left in
+        # place it would be shown against the new one as if it were current.
+        bgv.pop("ongridStatus", None)
+        bgv.pop("ongridStatusAt", None)
     timeline = list(bgv.get("verificationTimeline") or [])
     uploaded = sum(1 for d in doc_results if d["status"] == "uploaded")
-    opened = (
-        f"Re-sent documents to OnGrid (existing individual {individual_id})"
-        if reused
-        else f"Onboarded to OnGrid (individual {individual_id})"
-    )
+    if reused:
+        opened = f"Re-sent documents to OnGrid (existing individual {individual_id})"
+    elif foreign_id:
+        # Say why a new number appeared, or it reads like a duplicate record.
+        opened = (
+            f"Onboarded to OnGrid (individual {individual_id}); earlier individual "
+            f"{foreign_id} belongs to community {foreign_community or 'unknown'} and was not reused"
+        )
+    else:
+        opened = f"Onboarded to OnGrid (individual {individual_id})"
     timeline.append(
         {
             "date": _now(),
