@@ -75,11 +75,26 @@ def has_consent(request: dict[str, Any]) -> bool:
     return bool(consent.get("agreed")) and bool(str(consent.get("text") or "").strip())
 
 
+#: Links that ask the candidate to return a letter they have signed, rather
+#: than to submit identity documents. Nothing uploaded through one is ever sent
+#: to OnGrid - `bgv_ongrid._pick_doc_request` skips these kinds outright.
+LETTER_KINDS = ("signed-offer", "signed-appointment")
+
+
 def needs_consent(request: dict[str, Any]) -> bool:
-    """An employee request is for someone already hired and already verified, so
-    there is no background verification to consent to. Everything else - including
-    every request created before `entityType` existed - is a candidate's joining
-    documents."""
+    """Is there a background verification for this link to consent to?
+
+    No, in two cases. An employee request is for someone already hired and
+    already verified. And a signed-letter link is the candidate returning their
+    own countersigned contract - it goes nowhere near a verification partner,
+    and its page carries no consent checkbox, so demanding consent there is a
+    dead end the candidate cannot get out of.
+
+    Everything else - including every request created before `entityType`
+    existed - is a candidate's joining documents.
+    """
+    if request.get("kind") in LETTER_KINDS:
+        return False
     return (request.get("entityType") or "candidate") != "employee"
 
 

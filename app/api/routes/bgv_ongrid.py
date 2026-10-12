@@ -23,7 +23,7 @@ from app.api.dependencies import get_repository, get_storage, require_user
 from app.core.config import Settings, get_settings
 from app.core.errors import NotFoundError, ValidationError
 from app.core.logging import get_logger
-from app.api.routes.doc_requests import has_consent
+from app.api.routes.doc_requests import LETTER_KINDS, has_consent
 from app.repositories.base import DocumentRepository
 from app.services import bgv_checks
 from app.services.ongrid import GENDER_TO_ONGRID, OnGridClient, OnGridError
@@ -56,7 +56,7 @@ def _pick_doc_request(repo: DocumentRepository, candidate_id: str) -> dict[str, 
         r
         for r in repo.list(DOC_REQUESTS)
         if r.get("candidateId") == candidate_id
-        and r.get("kind") not in ("signed-offer", "signed-appointment")
+        and r.get("kind") not in LETTER_KINDS
     ]
     if not requests:
         return None
