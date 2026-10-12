@@ -104,6 +104,7 @@ def _settings() -> Any:
     from app.core.config import Settings
 
     return Settings(
+        ongrid_base_url="https://api.ongrid.in/app",
         ongrid_username="user",
         ongrid_password="secret",
         ongrid_community_id="187363",
@@ -194,7 +195,10 @@ def _settings_for(community: str) -> Any:
     from app.core.config import Settings
 
     return Settings(
-        ongrid_username="user", ongrid_password="secret", ongrid_community_id=community
+        ongrid_base_url="https://api.ongrid.in/app",
+        ongrid_username="user",
+        ongrid_password="secret",
+        ongrid_community_id=community,
     )
 
 
@@ -323,3 +327,60 @@ def test_the_timeline_explains_why_a_new_number_appeared(client: Any) -> None:
 
     assert "193781" in action and "79355" in action
     assert "not reused" in action
+
+
+# -- there is no staging to fall back to -------------------------------------
+#
+# A default of staging meant a missing ONGRID_BASE_URL did not fail. It sent
+# real candidates to the staging community instead, and nothing in the app
+# said so. Unset must mean off.
+
+
+def _settings_env(**over: Any) -> Any:
+    from app.core.config import Settings
+
+    base = {
+        "ongrid_base_url": "https://api.ongrid.in/app",
+        "ongrid_username": "user",
+        "ongrid_password": "secret",
+        "ongrid_community_id": "187363",
+    }
+    base.update(over)
+    return Settings(**base)
+
+
+def test_no_ongrid_url_is_configured_by_default() -> None:
+    # `_env_file=None` reads the code default, not whatever this machine's
+    # .env happens to say - the point is that the fallback baked into the
+    # source is nothing at all.
+    from app.core.config import Settings
+
+    default = Settings(_env_file=None).ongrid_base_url
+    assert default == "", "a default URL is a default community"
+    assert "staging" not in default
+
+
+def test_ongrid_is_off_until_the_url_is_set() -> None:
+    # Credentials alone are not enough: they say who we are, not which OnGrid.
+    assert _settings_env(ongrid_base_url="").has_ongrid is False
+    assert _settings_env().has_ongrid is True
+
+
+@pytest.mark.parametrize(
+    "missing", ["ongrid_base_url", "ongrid_username", "ongrid_password", "ongrid_community_id"]
+)
+def test_every_one_of_the_four_is_required(missing: str) -> None:
+    assert _settings_env(**{missing: ""}).has_ongrid is False
+
+
+def test_an_unconfigured_server_does_not_quietly_pick_a_community(client: Any) -> None:
+    # The route's own guard, with the URL missing rather than the credentials.
+    repo = _Repo(None)
+    result = bgv_ongrid.ongrid_onboard(
+        candidate_id=CANDIDATE_ID,
+        settings=_settings_env(ongrid_base_url=""),
+        repo=repo,  # type: ignore[arg-type]
+        storage=_Storage(),  # type: ignore[arg-type]
+    )
+    assert result.ok is False
+    assert client.created == [], "nothing may be created when no OnGrid is configured"

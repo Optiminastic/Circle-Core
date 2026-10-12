@@ -87,7 +87,11 @@ class Settings(BaseSettings):
     # OnGrid background-verification API (Basic auth). Onboards a hired candidate
     # into a community; verifications themselves are triggered by HR in OnGrid's
     # portal. base_url points at the /app basePath. See app/services/ongrid.py.
-    ongrid_base_url: str = "https://api-staging.ongrid.in/app"
+    # No default. A default of staging meant that forgetting this variable did
+    # not fail - it quietly sent real candidates to the staging community,
+    # which is exactly what happened in production for three weeks. Unset now
+    # means OnGrid is switched off, and the UI says so.
+    ongrid_base_url: str = ""
     ongrid_username: str = ""
     ongrid_password: str = ""
     ongrid_community_id: str = ""
@@ -294,8 +298,13 @@ class Settings(BaseSettings):
 
     @property
     def has_ongrid(self) -> bool:
+        # The base URL counts: it decides which OnGrid, and therefore which
+        # community a given individual id refers to.
         return bool(
-            self.ongrid_username and self.ongrid_password and self.ongrid_community_id
+            self.ongrid_base_url
+            and self.ongrid_username
+            and self.ongrid_password
+            and self.ongrid_community_id
         )
 
     @property
