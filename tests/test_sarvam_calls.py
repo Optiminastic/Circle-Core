@@ -18,6 +18,7 @@ import pytest
 
 from app.services.sarvam_calls import (
     MAX_QUESTIONS,
+    candidate_context,
     SarvamCallProvider,
     SarvamCallSettings,
     format_questions,
@@ -43,7 +44,7 @@ def provider() -> SarvamCallProvider:
 def payload(**over: Any) -> dict[str, Any]:
     args: dict[str, Any] = {
         "screening_call_id": "SC-1",
-        "candidate_name": "Tanya Jalgaonkar",
+        "candidate": {"fullName": "Tanya Jalgaonkar"},
         "job_title": "PR Executive",
         "questions": [{"text": "Do you have 2+ years experience?", "type": "yesno"}],
     }
@@ -71,7 +72,7 @@ def test_the_candidate_is_passed_by_first_name() -> None:
 
 
 def test_a_missing_name_does_not_become_an_empty_greeting() -> None:
-    assert payload(candidate_name="  ")["app_config"]["agent_variables"]["user_name"] == "there"
+    assert payload(candidate={"fullName": "  "})["app_config"]["agent_variables"]["user_name"] == "there"
 
 
 def test_the_outputs_the_agent_requires_are_sent_empty() -> None:
@@ -194,3 +195,56 @@ def test_the_whole_body_matches_the_documented_schema() -> None:
         "connection_id", "agent_phone_number",
     }
     json.dumps(body)  # must be serialisable as sent
+
+
+# -- what Circle already knows ------------------------------------------------
+
+
+def test_the_agent_is_given_what_circle_already_knows() -> None:
+    variables = payload(
+        candidate={
+            "fullName": "Tanya Jalgaonkar",
+            "totalExperienceYears": 4,
+            "relevantExperienceYears": 2,
+            "noticePeriodDays": 30,
+            "currentDesignation": "Senior Analyst",
+            "currentCompany": "Acme",
+            "keywordMatches": ["Figma", "Canva"],
+        }
+    )["app_config"]["agent_variables"]
+    assert variables["experience"] == "4 years total, 2 years relevant to this role"
+    assert variables["notice_period"] == "30 days"
+    assert variables["candidate_background"] == (
+        "Currently Senior Analyst at Acme. their resume mentions Figma, Canva."
+    )
+
+
+def test_a_fresher_does_not_sound_like_a_gap() -> None:
+    # No company, no years. The prompt treats empty as unknown and says
+    # nothing, which is the right behaviour for someone's first job.
+    context = candidate_context({"fullName": "A", "totalExperienceYears": 0, "noticePeriodDays": 0})
+    assert context["experience"] == ""
+    assert context["candidate_background"] == ""
+    assert context["notice_period"] == "available immediately"
+
+
+def test_experience_is_not_repeated_when_all_of_it_is_relevant() -> None:
+    context = candidate_context({"totalExperienceYears": 3, "relevantExperienceYears": 3})
+    assert context["experience"] == "3 years"
+
+
+def test_one_year_is_not_one_years() -> None:
+    assert candidate_context({"totalExperienceYears": 1})["experience"] == "1 year"
+
+
+def test_a_missing_candidate_record_yields_empty_context_not_a_crash() -> None:
+    assert candidate_context({}) == {
+        "experience": "", "notice_period": "", "candidate_background": "",
+    }
+
+
+def test_the_keyword_list_is_a_hint_not_a_recital() -> None:
+    many = [f"skill{n}" for n in range(1, 21)]
+    background = candidate_context({"keywordMatches": many})["candidate_background"]
+    assert background.count(",") < 10
+    assert "skill20" not in background

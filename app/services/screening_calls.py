@@ -134,7 +134,7 @@ class ScreeningCallService:
         if callable(build_payload):
             assistant = build_payload(
                 screening_call_id=call["id"],
-                candidate_name=str(candidate.get("fullName") or ""),
+                candidate=candidate,
                 job_title=str(job.get("title") or ""),
                 questions=questions,
             )
