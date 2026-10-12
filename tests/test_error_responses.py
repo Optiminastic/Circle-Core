@@ -106,3 +106,60 @@ def test_a_bare_app_error_does_not_fall_back_to_its_docstring() -> None:
     body = _client(ObscureFailure()).get("/boom").json()
     assert body["detail"] == SERVER_ERROR_DETAIL
     assert "write-ahead" not in body["detail"]
+
+
+# -- FastAPI's own schema failures -------------------------------------------
+#
+# These never reach the AppError handler. Left alone, FastAPI answers with a
+# list of {loc, msg, type, input}: a field path, a library phrase, and the
+# submitted value echoed back.
+
+
+def _form_client() -> TestClient:
+    from fastapi import File, Form, UploadFile
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.post("/upload")
+    def upload(docType: str = Form(...), file: UploadFile = File(...)) -> dict[str, str]:
+        return {}
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_a_schema_failure_answers_with_a_sentence_not_a_field_list() -> None:
+    from app.core.errors import SCHEMA_ERROR_DETAIL
+
+    res = _form_client().post("/upload")  # neither field sent
+    assert res.status_code == 422
+    assert res.json() == {"error": "validation_error", "detail": SCHEMA_ERROR_DETAIL}
+
+
+def test_a_schema_failure_does_not_echo_back_what_was_submitted() -> None:
+    body = _form_client().post("/upload", data={"docType": "PAN Card"}).text
+    for giveaway in ("loc", "input", "Field required", "docType", "PAN Card"):
+        assert giveaway not in body, giveaway
+
+
+def test_our_own_validation_error_keeps_its_wording_at_the_same_status() -> None:
+    # Both are 422. Only FastAPI's generated one is generalised - ours is the
+    # sentence someone wrote for the candidate.
+    said = "This upload link has expired. Please ask HR for a new one."
+    res = _client(ValidationError(said)).get("/boom")
+    assert res.status_code == 422
+    assert res.json()["detail"] == said
+
+
+def test_the_submitted_values_are_not_written_to_the_log(caplog: object) -> None:
+    # `input` carries a name, an email or a phone number on these portals.
+    import logging
+
+    import pytest as _pytest
+
+    assert isinstance(caplog, _pytest.LogCaptureFixture)
+    with caplog.at_level(logging.WARNING):
+        _form_client().post("/upload", data={"docType": "Aadhaar of Priya Sharma"})
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Priya Sharma" not in logged
+    assert "body.file" in logged, "the field that failed is still worth logging"

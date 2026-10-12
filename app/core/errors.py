@@ -8,6 +8,7 @@ consistent, structured HTTP responses without leaking implementation details
 from __future__ import annotations
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .logging import get_logger
@@ -75,6 +76,15 @@ class StorageError(AppError):
 #: written for them and is kept.
 SERVER_ERROR_DETAIL = "Something went wrong on our side. Please try again in a moment."
 
+#: FastAPI answers its own schema failures with a list of
+#: {loc, msg, type, input} - a field path, a library phrase like "Field
+#: required", and the submitted value echoed back. That is for whoever wrote
+#: the client, not whoever is using it, and it never reaches this shape from
+#: our own UI anyway.
+SCHEMA_ERROR_DETAIL = (
+    "Some of the information sent was not valid. Please check the form and try again."
+)
+
 
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
@@ -85,6 +95,19 @@ def register_exception_handlers(app: FastAPI) -> None:
             logger.exception("AppError: %s", detail)
             detail = SERVER_ERROR_DETAIL
         return JSONResponse(status_code=exc.status_code, content={"error": exc.code, "detail": detail})
+
+    @app.exception_handler(RequestValidationError)
+    async def _handle_schema_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        # Only the field paths are logged. `input` holds what the person
+        # typed, which on these portals is their name, email or phone.
+        fields = ", ".join(
+            ".".join(str(part) for part in (err.get("loc") or ())) for err in exc.errors()
+        )
+        logger.warning("Schema validation failed for: %s", fields or "unknown fields")
+        return JSONResponse(
+            status_code=422,
+            content={"error": "validation_error", "detail": SCHEMA_ERROR_DETAIL},
+        )
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(_: Request, exc: Exception) -> JSONResponse:
