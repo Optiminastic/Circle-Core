@@ -78,7 +78,49 @@ def has_consent(request: dict[str, Any]) -> bool:
 #: Links that ask the candidate to return a letter they have signed, rather
 #: than to submit identity documents. Nothing uploaded through one is ever sent
 #: to OnGrid - `bgv_ongrid._pick_doc_request` skips these kinds outright.
-LETTER_KINDS = ("signed-offer", "signed-appointment")
+LETTER_KINDS = ("signed-offer", "signed-appointment", "signed-internship")
+
+#: Items on a documents link that are filled in as a form on the portal rather
+#: than uploaded as a file, so they never appear as a submission. Mirrors
+#: BANK_DOC_TYPE / REFERENCES_DOC_TYPE in circle-fe/lib/onboarding-docs.ts.
+#: The document each of those links asks for, by name. Stricter than an
+#: ordinary upload: a signed contract is a PDF or a Word file, never a photo.
+SIGNED_LETTER_DOCS = (
+    "Signed Offer Letter",
+    "Signed Appointment Letter",
+    "Signed Internship Letter",
+)
+
+BANK_DOC_TYPE = "Bank details"
+REFERENCES_DOC_TYPE = "Reference contacts"
+
+
+def is_fully_submitted(request: dict[str, Any], uploaded_types: set[str]) -> bool:
+    """Has everything this link asked for actually arrived?
+
+    `requiredDocs` mixes files with the two on-page forms, so each half is
+    checked in its own terms: a file counts once it is uploaded, a form once it
+    is filled. Crucially, a form is only waited on when it was asked for - an
+    intern is asked for documents and no bank account, and a link that waits
+    for details it never requested can never leave `Pending`.
+    """
+    required = set(request.get("requiredDocs") or [])
+    if not required:
+        return False  # a link that asks for nothing was built wrong
+
+    required_files = required - {BANK_DOC_TYPE, REFERENCES_DOC_TYPE}
+    if not required_files.issubset(uploaded_types):
+        return False
+
+    if BANK_DOC_TYPE in required:
+        bank = request.get("bankDetails") or {}
+        if not (str(bank.get("accountNumber") or "").strip() and str(bank.get("ifscCode") or "").strip()):
+            return False
+
+    if REFERENCES_DOC_TYPE in required and not (request.get("references") or []):
+        return False
+
+    return True
 
 
 def needs_consent(request: dict[str, Any]) -> bool:
@@ -144,8 +186,9 @@ async def upload_request_document(
     if len(data) > limit:
         raise ValidationError(f"File exceeds the {settings.max_upload_mb} MB limit.")
 
-    # Signed letters (offer / appointment) are stricter: PDF/Word only, under 5 MB.
-    if docType in ("Signed Offer Letter", "Signed Appointment Letter"):
+    # Signed letters (offer / appointment / internship) are stricter: PDF/Word
+    # only, under 5 MB.
+    if docType in SIGNED_LETTER_DOCS:
         name = (file.filename or "").lower()
         allowed_types = {
             "application/pdf",
@@ -207,10 +250,7 @@ async def upload_request_document(
     request["submissions"] = submissions
 
     # Overall request status: Submitted once every required doc is present.
-    uploaded_types = {s["docType"] for s in submissions}
-    bank = request.get("bankDetails") or {}
-    bank_complete = bool(bank.get("accountNumber")) and bool(bank.get("ifscCode"))
-    if required and uploaded_types.issuperset(set(required)) and bank_complete:
+    if is_fully_submitted(request, {s["docType"] for s in submissions}):
         if request.get("status") not in ("Verified",):
             request["status"] = "Submitted"
     request["updatedAt"] = now

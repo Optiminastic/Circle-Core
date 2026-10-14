@@ -120,7 +120,9 @@ def owner_refs(employee: dict[str, Any]) -> set[tuple[str, str]]:
 # Letters the candidate signs and returns: accepted unless HR rejects the copy
 # (the onboarding stepper's own rule). Every other requested document - ID
 # proofs, certificates, bank proof - counts only once HR has verified it.
-_SIGNED_LETTERS = frozenset({"Signed Offer Letter", "Signed Appointment Letter"})
+_SIGNED_LETTERS = frozenset(
+    {"Signed Offer Letter", "Signed Appointment Letter", "Signed Internship Letter"}
+)
 
 
 def _accepted(submission: dict[str, Any]) -> bool:

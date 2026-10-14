@@ -249,25 +249,45 @@ def import_from_drive(
     return meta
 
 
+def download_disposition(filename: str, *, download: bool) -> str:
+    """The Content-Disposition to presign with.
+
+    Saving a file is the server's decision to state, not something the browser
+    should infer from the content type. Left to infer it, a browser renders a
+    PDF in its own viewer - which carries a download button - and paints an
+    image straight onto the page, which does not. HR could save a candidate's
+    PAN card and not their Aadhaar photo, purely because of the file type.
+
+    Nothing here may branch on the extension.
+    """
+    return f'{"attachment" if download else "inline"}; filename="{filename}"'
+
+
 @router.get("/{doc_id}/url")
 def get_download_url(
     doc_id: str,
     request: Request,
+    download: bool = False,
     settings: Settings = Depends(get_settings),
     repo: DocumentRepository = Depends(get_repository),
     storage: FileStorage = Depends(get_storage),
 ) -> dict[str, Any]:
     doc = _get_or_404(repo, doc_id)
+    # Checked before the flag is read, so asking for a download can never be a
+    # way round the permission needed to view the same file.
     _require_view_access(request, settings, doc)
-    # Serve the file inline so previewable types (PDF, images) open in the browser
-    # tab instead of downloading; non-previewable types still resolve fine.
+    # Default stays inline, so previewable types open in the browser tab.
     filename = _safe_name(doc.get("fileName") or "file")
     url = storage.presigned_url(
         doc["storageKey"],
-        disposition=f'inline; filename="{filename}"',
+        disposition=download_disposition(filename, download=download),
         content_type=doc.get("contentType") or None,
     )
-    return {"url": url, "fileName": doc.get("fileName")}
+    return {
+        "url": url,
+        "fileName": doc.get("fileName"),
+        "disposition": "attachment" if download else "inline",
+    }
 
 
 @router.get("/{doc_id}/preview")
