@@ -214,6 +214,36 @@ def belongs_here(bgv: dict[str, Any], settings: Settings) -> bool:
     return str(bgv.get("ongridCommunityId") or "") == str(settings.ongrid_community_id or "")
 
 
+#: Where OnGrid has been seen to put the report link. `servingUrl` comes from
+#: /report, `consolidatedReportUrl` from the status payload. Some responses
+#: wrap the body in `data` or `result`, so those are unwrapped before looking.
+_REPORT_KEYS = ("servingUrl", "consolidatedReportUrl", "reportUrl", "url")
+_REPORT_WRAPPERS = ("data", "result", "report")
+
+
+def report_url_from(payload: Any) -> str | None:
+    """The report link in an OnGrid response, or None if there is not one.
+
+    Pulled out of the request flow so an unrecognised response shape is a
+    visible, testable case rather than silently becoming "no report" - which is
+    what left HR looking at a finished report in OnGrid with no way to get it
+    from Circle.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in _REPORT_KEYS:
+        value = str(payload.get(key) or "").strip()
+        # A status word in the field is not a link; handing one to the UI
+        # renders a download button that cannot open anything.
+        if value.startswith("http"):
+            return value
+    for wrapper in _REPORT_WRAPPERS:
+        found = report_url_from(payload.get(wrapper))
+        if found:
+            return found
+    return None
+
+
 class StatusResult(BaseModel):
     ok: bool
     individualId: str | None = None
@@ -260,13 +290,35 @@ def ongrid_status(
 
     # Best-effort: the report only exists once every check has finished, and
     # asking early is an error rather than an empty answer. A missing report
-    # must not turn a perfectly good status into a failure.
-    report = payload.get("consolidatedReportUrl")
+    # must not turn a perfectly good status into a failure - but it must not be
+    # invisible either, so every way of ending up without one is logged.
+    report = report_url_from(payload)
     if not report and checks:
         try:
-            report = client.consolidated_report(individual_id).get("servingUrl")
-        except OnGridError:
+            answer = client.consolidated_report(individual_id)
+            report = report_url_from(answer)
+            if not report:
+                # OnGrid answered, but not with a link we recognise. Log the
+                # field names only - the values can carry candidate data.
+                logger.warning(
+                    "OnGrid report for candidate %s had no usable link; fields: %s",
+                    candidate_id,
+                    sorted(answer.keys()) if isinstance(answer, dict) else type(answer).__name__,
+                )
+        except OnGridError as exc:
+            logger.warning(
+                "OnGrid report fetch failed for candidate %s (status %s): %s",
+                candidate_id, getattr(exc, "status", None), exc,
+            )
             report = None
+
+    # A link we already hold beats none at all: the report does not move once
+    # it exists, so a failed fetch should not hide one we fetched before.
+    if not report:
+        cached = report_url_from(bgv.get("ongridStatus"))
+        if cached:
+            logger.info("Serving the cached OnGrid report link for candidate %s", candidate_id)
+            report = cached
 
     # Cached so the panel has something to show before this call returns, and
     # so the record keeps the last known state if OnGrid is unreachable.
