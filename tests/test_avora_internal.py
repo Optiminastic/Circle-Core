@@ -271,8 +271,33 @@ def test_profile_mapping() -> None:
         "personalDetails": {"dateOfBirth": "1998-04-12", "gender": "Female", "panNumber": "X"},
     })
     assert out == {"employee_code": "EMP-1", "date_of_birth": "1998-04-12", "gender": "Female",
-                   "avatar_document_id": "abc123def456"}
+                   "avatar_document_id": "abc123def456", "buddy_email": None}
     assert profile_for({"id": "EMP-2", "personalDetails": {"dateOfBirth": "12/04/1998"}})["date_of_birth"] is None
+
+
+def test_buddy_mapping() -> None:
+    from app.services.avora_export import buddy_code, buddy_email, profile_for
+
+    assert buddy_code({"buddyEmployeeId": " EMP-9 "}) == "EMP-9"
+    assert buddy_code({}) is None and buddy_code(None) is None
+    assert buddy_email({"email": "Ravi@Corp.io", "status": "Active"}) == "ravi@corp.io"
+    # A buddy who has left, or has no usable address, is no buddy.
+    assert buddy_email({"email": "ravi@corp.io", "status": "Offboarded"}) is None
+    assert buddy_email({"email": "not-an-email"}) is None
+    assert profile_for({"id": "EMP-1"}, {"email": "ravi@corp.io"})["buddy_email"] == "ravi@corp.io"
+
+
+@needs_db
+def test_profile_names_the_onboarding_buddy(client: Any) -> None:
+    from app.repositories.document_repository import SqlAlchemyDocumentRepository
+
+    with client.app.state.database.session() as session:
+        repo = SqlAlchemyDocumentRepository(session)
+        onboarding = repo.get("onboarding", "cand-asha") or {}
+        repo.upsert("onboarding", "cand-asha", {**onboarding, "buddyEmployeeId": "EMP-702"})
+    assert _get(client, "/profile?email=asha@corp.io").json()["buddy_email"] == "ravi@corp.io"
+    # Ravi has no onboarding record, so no buddy - not an error.
+    assert _get(client, "/profile?email=ravi@corp.io").json()["buddy_email"] is None
 
 
 @needs_db

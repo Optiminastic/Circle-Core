@@ -94,11 +94,30 @@ def _shareable_documents(repo: DocumentRepository, employee: dict[str, Any]) -> 
     }
 
 
+def _onboarding_of(repo: DocumentRepository, employee: dict[str, Any]) -> dict[str, Any] | None:
+    """The onboarding record this employee was converted from (keyed by their
+    candidate id), or one that names them as its employee."""
+    candidate_id = employee.get("candidateId")
+    record = repo.get(_ONBOARDING, str(candidate_id)) if candidate_id else None
+    if record is None and employee.get("id"):
+        matches = repo.find(_ONBOARDING, {"employeeId": employee["id"]}, limit=1)
+        record = matches[0] if matches else None
+    return record
+
+
+def _buddy_of(repo: DocumentRepository, employee: dict[str, Any]) -> dict[str, Any] | None:
+    code = avora_export.buddy_code(_onboarding_of(repo, employee))
+    if not code or code == employee.get("id"):
+        return None
+    return repo.get(_EMPLOYEES, code)
+
+
 @router.get("/profile")
 def employee_profile(
     email: EmailQuery, repo: DocumentRepository = Depends(get_repository)
 ) -> dict[str, Any]:
-    return avora_export.profile_for(_employee_by_email(repo, email))
+    employee = _employee_by_email(repo, email)
+    return avora_export.profile_for(employee, _buddy_of(repo, employee))
 
 
 @router.get("/avatar")

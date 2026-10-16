@@ -191,9 +191,23 @@ def avatar_document_id(employee: dict[str, Any]) -> str | None:
     return found.group(1) if found else None
 
 
-def profile_for(employee: dict[str, Any]) -> dict[str, Any]:
-    """Personal details Avora fills in when it has none: birthday emails and
-    payslips use them. Never sent through id-sync."""
+def buddy_code(onboarding: dict[str, Any] | None) -> str | None:
+    """The employee code of the onboarding buddy HR assigned at step 6."""
+    return _text((onboarding or {}).get("buddyEmployeeId"))
+
+
+def buddy_email(buddy: dict[str, Any] | None) -> str | None:
+    """The buddy's work email, the key Avora matches people on. A buddy who has
+    since left is not a buddy any more."""
+    if not buddy or buddy.get("status") == "Offboarded":
+        return None
+    email = _text(buddy.get("email"))
+    return email.lower() if email and "@" in email else None
+
+
+def profile_for(employee: dict[str, Any], buddy: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Personal details Avora fills in when it has none (birthday emails and
+    payslips use them), plus the onboarding buddy. Never sent through id-sync."""
     details = employee.get("personalDetails") or {}
     dob = _text(details.get("dateOfBirth"))
     return {
@@ -201,4 +215,5 @@ def profile_for(employee: dict[str, Any]) -> dict[str, Any]:
         "date_of_birth": dob if dob and _ISO_DAY.match(dob) else None,
         "gender": _text(details.get("gender")),
         "avatar_document_id": avatar_document_id(employee),
+        "buddy_email": buddy_email(buddy),
     }
