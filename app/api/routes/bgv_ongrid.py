@@ -244,6 +244,22 @@ def report_url_from(payload: Any) -> str | None:
     return None
 
 
+def report_complete(payload: Any) -> bool | None:
+    """Whether OnGrid says every check behind this report has finished.
+
+    None when they do not say. An interim report filed as the final one is
+    worse than no report, so this is never guessed - the UI labels the download
+    only when OnGrid has stated it either way.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for wrapper in (None, *_REPORT_WRAPPERS):
+        body = payload if wrapper is None else payload.get(wrapper)
+        if isinstance(body, dict) and isinstance(body.get("bgvChecksCompleted"), bool):
+            return bool(body["bgvChecksCompleted"])
+    return None
+
+
 class StatusResult(BaseModel):
     ok: bool
     individualId: str | None = None
@@ -251,6 +267,9 @@ class StatusResult(BaseModel):
     """One row per check OnGrid is actually running, with its own state."""
     checks: list[dict[str, str]] = []
     reportUrl: str | None = None
+    """True/False as OnGrid stated it; None when they did not. An interim
+    report (checks still running) must never be presented as the final one."""
+    reportComplete: bool | None = None
     reason: str | None = None
 
 
@@ -293,10 +312,12 @@ def ongrid_status(
     # must not turn a perfectly good status into a failure - but it must not be
     # invisible either, so every way of ending up without one is logged.
     report = report_url_from(payload)
+    complete = report_complete(payload)
     if not report and checks:
         try:
             answer = client.consolidated_report(individual_id)
             report = report_url_from(answer)
+            complete = report_complete(answer)
             if not report:
                 # OnGrid answered, but not with a link we recognise. Log the
                 # field names only - the values can carry candidate data.
@@ -322,7 +343,10 @@ def ongrid_status(
 
     # Cached so the panel has something to show before this call returns, and
     # so the record keeps the last known state if OnGrid is unreachable.
-    bgv["ongridStatus"] = {"overall": overall, "checks": checks, "reportUrl": report}
+    bgv["ongridStatus"] = {
+        "overall": overall, "checks": checks,
+        "reportUrl": report, "reportComplete": complete,
+    }
     bgv["ongridStatusAt"] = _now()
     repo.upsert(BGVS, candidate_id, bgv)
 
@@ -332,6 +356,7 @@ def ongrid_status(
         overallStatus=overall,
         checks=checks,
         reportUrl=str(report) if report else None,
+        reportComplete=complete,
     )
 
 
