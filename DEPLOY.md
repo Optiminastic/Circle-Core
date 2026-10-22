@@ -92,10 +92,13 @@ id-sync updates the shared directory and passes the change on to Keycloak and Av
 Check stuck deliveries:
 `docker compose exec -T db psql -U circle circle -c "SELECT employee_id, attempts, last_error, next_attempt_at FROM identity_outbox ORDER BY attempts DESC"`
 
-## Avora: pay, bank details and documents
+## Avora: pay, bank, personal details, appraisals, assets and documents
 Avora's backend reads one employee at a time from `/api/internal/avora/*`, looked up by work email.
 Its `scheduler-circle-documents` worker copies each employee's documents into Avora once; nothing in Circle is ever deleted or changed.
 Files still on the employee's original candidate record (e.g. signed offer/appointment letters) are included.
+The same worker keeps Avora's copy of what Circle owns in step: `/compensation` (pay and bank), `/profile` (contact details, employment type, work location, manager, masked IDs), `/appraisals` and `/assets`.
+Circle wins: HR edits these only in Circle, and Avora shows them read-only.
+- PAN, Aadhaar and UAN are masked here (last 4 characters only); the full numbers never leave Circle.
 - Set `AVORA_API_SECRET` here and the same value as `CIRCLE_API_SECRET` in Avora.
 - It is deliberately a different secret from `INTERNAL_API_SECRET` (which id-sync holds).
 - Avora decides who sees what: pay only for HR/admin/payroll, documents only for HR/admin and the person.

@@ -124,7 +124,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
             from sqlalchemy import text
 
             # Disposable test database only (CIRCLE_TEST_DATABASE_URL): start clean.
-            session.execute(text("TRUNCATE employees, documents, doc_requests, onboarding"))
+            session.execute(text("TRUNCATE employees, documents, doc_requests, onboarding, assets"))
             repo = SqlAlchemyDocumentRepository(session)
             for code, email, cand in (("EMP-701", "Asha@Corp.io", "cand-asha"),
                                       ("EMP-702", "ravi@corp.io", "cand-ravi")):
@@ -134,7 +134,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
                                                     "offerLetter": {"ctcAnnual": 410000, "pfEnabled": False}})
             repo.upsert("doc_requests", "req-asha", {"id": "req-asha", "candidateId": "cand-asha", "submissions": [
                 {"docType": "PAN card", "documentId": "avdoc000006", "status": "Verified", "uploadedAt": "2026-08-02"},
-                {"docType": "Address proof", "documentId": "avdoc000008", "status": "Rejected", "uploadedAt": "2026-08-02"},
+                {"docType": "Address proof", "documentId": "avdoc000008", "status": "Rejected",
+                 "uploadedAt": "2026-08-02"},
                 {"docType": "Education certificates", "documentId": "avdoc000009", "status": "Submitted",
                  "uploadedAt": "2026-08-02"},
             ]})
@@ -271,7 +272,10 @@ def test_profile_mapping() -> None:
         "personalDetails": {"dateOfBirth": "1998-04-12", "gender": "Female", "panNumber": "X"},
     })
     assert out == {"employee_code": "EMP-1", "date_of_birth": "1998-04-12", "gender": "Female",
-                   "avatar_document_id": "abc123def456", "buddy_email": None}
+                   "avatar_document_id": "abc123def456", "buddy_email": None,
+                   "manager_code": None, "manager_email": None, "phone": None, "personal_email": None,
+                   "address": None, "emergency_contact": None, "employment_type": None,
+                   "work_location": None, "pan_masked": None, "aadhaar_masked": None, "uan_masked": None}
     assert profile_for({"id": "EMP-2", "personalDetails": {"dateOfBirth": "12/04/1998"}})["date_of_birth"] is None
 
 
@@ -313,3 +317,139 @@ def test_avatar_only_served_when_it_is_the_persons_own(client: Any) -> None:
     assert _get(client, "/avatar?email=asha@corp.io").status_code == 200
     assert _get(client, "/avatar?email=ravi@corp.io").status_code == 404
     assert _get(client, "/profile?email=asha@corp.io").json()["avatar_document_id"] == "avdoc000003"
+
+
+@pytest.mark.parametrize(
+    ("raw", "grouped", "expected"),
+    [("ABCDE1234F", False, "XXXXXX234F"), ("abcde 1234 f", False, "XXXXXX234F"),
+     ("1234 5678 9012", True, "XXXX XXXX 9012"), ("123456789012", False, "XXXXXXXX9012"),
+     # Already masked (OCR does this for Aadhaar) masks to the same thing.
+     ("XXXXXXXX9012", True, "XXXX XXXX 9012"),
+     # Too short to be real, fully masked, or empty: nothing is sent.
+     ("1234", True, None), ("XXXXXXXXXXXX", True, None), ("", False, None), (None, False, None)],
+)
+def test_id_numbers_are_masked(raw: Any, grouped: bool, expected: str | None) -> None:
+    from app.services.avora_export import mask_id_number
+
+    assert mask_id_number(raw, grouped=grouped) == expected
+
+
+def test_profile_carries_details_and_never_a_full_id_number() -> None:
+    from app.services.avora_export import profile_for
+
+    out = profile_for(
+        {"id": "EMP-1", "phone": " +91 98765 43210 ", "personalEmail": "asha@home.io",
+         "employmentType": "Full-time", "workLocation": "Mumbai", "reportingManagerId": "EMP-9",
+         "personalDetails": {"address": "12 MG Road", "emergencyContact": "Ravi 99999",
+                             "panNumber": "ABCDE1234F", "aadhaarNumber": "123456789012"}},
+        manager={"email": "Boss@Corp.io", "status": "Active"},
+        uan="100200300400",
+    )
+    assert out["phone"] == "+91 98765 43210" and out["personal_email"] == "asha@home.io"
+    assert out["address"] == "12 MG Road" and out["emergency_contact"] == "Ravi 99999"
+    assert out["employment_type"] == "Full-time" and out["work_location"] == "Mumbai"
+    assert out["manager_code"] == "EMP-9" and out["manager_email"] == "boss@corp.io"
+    assert (out["pan_masked"], out["aadhaar_masked"], out["uan_masked"]) == (
+        "XXXXXX234F", "XXXX XXXX 9012", "XXXXXXXX0400")
+    rendered = str(out)
+    assert "ABCDE1234F" not in rendered and "123456789012" not in rendered and "100200300400" not in rendered
+
+
+def test_departed_manager_is_not_named() -> None:
+    from app.services.avora_export import profile_for
+
+    out = profile_for({"id": "EMP-1", "reportingManagerId": "EMP-9"},
+                      manager={"email": "boss@corp.io", "status": "Offboarded"})
+    # The code still travels so Avora can log what it could not match.
+    assert out["manager_code"] == "EMP-9" and out["manager_email"] is None
+
+
+def test_latest_uan_is_the_newest_request() -> None:
+    from app.services.avora_export import latest_uan
+
+    assert latest_uan([{"uan": "111111111111", "createdAt": "2026-01-01"},
+                       {"uan": "222222222222", "createdAt": "2026-03-01"},
+                       {"uan": "", "createdAt": "2026-05-01"}]) == "222222222222"
+    assert latest_uan([]) is None
+
+
+def test_appraisal_history_mapping() -> None:
+    from app.services.avora_export import appraisals_for
+
+    out = appraisals_for({"appraisalHistory": [
+        {"id": "AP-1", "reviewPeriod": "Annual 2025", "status": "Completed", "currentSalary": "6 LPA",
+         "recommendedSalaryRevision": "7 LPA", "effectiveDate": "2025-04-01", "performanceScore": 4},
+        {"id": "AP-2", "reviewPeriod": "H1 2026", "status": "HR Review Pending", "effectiveDate": "2026-10-01",
+         "performanceScore": True},
+        {"reviewPeriod": "no id"}, "garbage",
+    ]})
+    assert [a["id"] for a in out] == ["AP-2", "AP-1"]  # newest first; id-less record dropped
+    assert out[1] == {"id": "AP-1", "period": "Annual 2025", "status": "Completed", "current_salary": "6 LPA",
+                      "revised_salary": "7 LPA", "effective_date": "2025-04-01", "score": 4.0}
+    assert out[0]["score"] is None  # a bool is not a score
+
+
+def test_asset_register_wins_over_the_employee_copy() -> None:
+    from app.services.avora_export import assets_for
+
+    out = assets_for(
+        {"assets": [{"id": "AST-1", "assetName": "Old name", "status": "Assigned"},
+                    {"id": "AST-2", "assetName": "Monitor", "assetType": "Monitor", "status": "Returned"}]},
+        [{"id": "AST-1", "assetName": "MacBook Pro", "assetType": "Laptop", "serialNumber": "SN1",
+          "status": "Assigned", "assignmentDate": "2026-08-21"}],
+    )
+    assert out == [
+        {"id": "AST-1", "name": "MacBook Pro", "type": "Laptop", "serial_number": "SN1", "status": "Assigned",
+         "assigned_date": "2026-08-21"},
+        {"id": "AST-2", "name": "Monitor", "type": "Monitor", "serial_number": None, "status": "Returned",
+         "assigned_date": None},
+    ]
+
+
+@needs_db
+@pytest.mark.parametrize("path", ["/profile", "/appraisals", "/assets"])
+def test_new_reads_require_the_secret(client: Any, path: str) -> None:
+    assert _get(client, f"{path}?email=asha@corp.io", secret=None).status_code == 403
+    assert _get(client, f"{path}?email=asha@corp.io", secret="wrong").status_code == 403
+
+
+@needs_db
+@pytest.mark.parametrize("path", ["/profile", "/appraisals", "/assets"])
+def test_new_reads_unknown_employee_is_404(client: Any, path: str) -> None:
+    assert _get(client, f"{path}?email=nobody@corp.io").status_code == 404
+
+
+@needs_db
+def test_profile_masks_ids_and_names_the_manager(client: Any) -> None:
+    from app.repositories.document_repository import SqlAlchemyDocumentRepository
+
+    with client.app.state.database.session() as session:
+        repo = SqlAlchemyDocumentRepository(session)
+        repo.upsert("employees", "EMP-701", {
+            "id": "EMP-701", "email": "asha@corp.io", "candidateId": "cand-asha", "reportingManagerId": "EMP-702",
+            "phone": "98765", "personalDetails": {"panNumber": "ABCDE1234F", "aadhaarNumber": "123456789012"}})
+        repo.upsert("doc_requests", "req-uan", {"id": "req-uan", "candidateId": "cand-asha",
+                                                "uan": "100200300400", "createdAt": "2026-08-01"})
+    resp = _get(client, "/profile?email=asha@corp.io")
+    body = resp.json()
+    assert body["manager_email"] == "ravi@corp.io" and body["phone"] == "98765"
+    assert (body["pan_masked"], body["aadhaar_masked"], body["uan_masked"]) == (
+        "XXXXXX234F", "XXXX XXXX 9012", "XXXXXXXX0400")
+    for full in ("ABCDE1234F", "123456789012", "100200300400"):
+        assert full not in resp.text
+
+
+@needs_db
+def test_appraisals_and_assets_are_only_the_persons_own(client: Any) -> None:
+    from app.repositories.document_repository import SqlAlchemyDocumentRepository
+
+    with client.app.state.database.session() as session:
+        repo = SqlAlchemyDocumentRepository(session)
+        repo.upsert("employees", "EMP-701", {"id": "EMP-701", "email": "asha@corp.io", "appraisalHistory": [
+            {"id": "AP-1", "reviewPeriod": "Annual 2025", "status": "Completed", "performanceScore": 4}]})
+        repo.upsert("assets", "AST-1", {"id": "AST-1", "assetName": "MacBook", "assignedToEmployeeId": "EMP-701"})
+        repo.upsert("assets", "AST-2", {"id": "AST-2", "assetName": "Ravi's", "assignedToEmployeeId": "EMP-702"})
+    appraisals = _get(client, "/appraisals?email=asha@corp.io").json()
+    assert [a["id"] for a in appraisals["appraisals"]] == ["AP-1"]
+    assert [a["id"] for a in _get(client, "/assets?email=asha@corp.io").json()["assets"]] == ["AST-1"]
+    assert _get(client, "/appraisals?email=ravi@corp.io").json()["appraisals"] == []

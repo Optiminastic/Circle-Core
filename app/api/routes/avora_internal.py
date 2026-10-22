@@ -1,4 +1,5 @@
-"""Server-to-server endpoints for Avora: one employee's pay, bank and documents.
+"""Server-to-server endpoints for Avora: one employee's pay, bank, documents,
+personal details, appraisal history and assets.
 
 Avora's backend calls these with `X-Avora-Secret`; no browser ever does. Avora
 applies its own, stricter access rules (only the employee, HR and admin) and
@@ -26,10 +27,11 @@ _EMPLOYEES = "employees"
 _DOCUMENTS = "documents"
 _ONBOARDING = "onboarding"
 _DOC_REQUESTS = "doc_requests"
+_ASSETS = "assets"
 
 
 def require_avora_secret(
-    settings: Settings = Depends(get_settings),
+    settings: Annotated[Settings, Depends(get_settings)],
     provided: Annotated[str | None, Header(alias=SECRET_HEADER)] = None,
 ) -> None:
     expected = settings.avora_api_secret
@@ -62,11 +64,13 @@ def _employee_by_email(repo: DocumentRepository, email: str) -> dict[str, Any]:
 
 
 EmailQuery = Annotated[str, Query(min_length=3, max_length=320)]
+RepoDep = Annotated[DocumentRepository, Depends(get_repository)]
+StorageDep = Annotated[FileStorage, Depends(get_storage)]
 
 
 @router.get("/compensation")
 def employee_compensation(
-    email: EmailQuery, repo: DocumentRepository = Depends(get_repository)
+    email: EmailQuery, repo: RepoDep
 ) -> dict[str, Any]:
     employee = _employee_by_email(repo, email)
     onboarding = repo.get(_ONBOARDING, str(employee["candidateId"])) if employee.get("candidateId") else None
@@ -74,14 +78,17 @@ def employee_compensation(
     return avora_export.compensation_for(employee, offer_letter if isinstance(offer_letter, dict) else None)
 
 
+def _requests_of(repo: DocumentRepository, employee: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every document request sent to this person, as candidate or employee."""
+    owner_ids = sorted({entity_id for _, entity_id in avora_export.owner_refs(employee)})
+    return [req for owner in owner_ids for req in repo.find(_DOC_REQUESTS, {"candidateId": owner})]
+
+
 def _shareable_documents(repo: DocumentRepository, employee: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """This person's shareable documents by id - the single rule used by both
     the listing and the download, so nothing unlisted can be fetched."""
     refs = avora_export.owner_refs(employee)
-    owner_ids = sorted({entity_id for _, entity_id in refs})
-    review = avora_export.review_of(
-        [req for owner in owner_ids for req in repo.find(_DOC_REQUESTS, {"candidateId": owner})]
-    )
+    review = avora_export.review_of(_requests_of(repo, employee))
     docs = [
         doc
         for entity_type, entity_id in sorted(refs)
@@ -112,19 +119,49 @@ def _buddy_of(repo: DocumentRepository, employee: dict[str, Any]) -> dict[str, A
     return repo.get(_EMPLOYEES, code)
 
 
+def _manager_of(repo: DocumentRepository, employee: dict[str, Any]) -> dict[str, Any] | None:
+    code = avora_export.manager_code(employee)
+    if not code or code == employee.get("id"):
+        return None
+    return repo.get(_EMPLOYEES, code)
+
+
 @router.get("/profile")
 def employee_profile(
-    email: EmailQuery, repo: DocumentRepository = Depends(get_repository)
+    email: EmailQuery, repo: RepoDep
 ) -> dict[str, Any]:
     employee = _employee_by_email(repo, email)
-    return avora_export.profile_for(employee, _buddy_of(repo, employee))
+    return avora_export.profile_for(
+        employee,
+        _buddy_of(repo, employee),
+        manager=_manager_of(repo, employee),
+        uan=avora_export.latest_uan(_requests_of(repo, employee)),
+    )
+
+
+@router.get("/appraisals")
+def employee_appraisals(
+    email: EmailQuery, repo: RepoDep
+) -> dict[str, Any]:
+    employee = _employee_by_email(repo, email)
+    return {"employee_code": employee.get("id"), "appraisals": avora_export.appraisals_for(employee)}
+
+
+@router.get("/assets")
+def employee_assets(
+    email: EmailQuery, repo: RepoDep
+) -> dict[str, Any]:
+    employee = _employee_by_email(repo, email)
+    code = str(employee.get("id") or "")
+    assigned = repo.find(_ASSETS, {"assignedToEmployeeId": code}) if code else []
+    return {"employee_code": employee.get("id"), "assets": avora_export.assets_for(employee, assigned)}
 
 
 @router.get("/avatar")
 def employee_avatar(
     email: EmailQuery,
-    repo: DocumentRepository = Depends(get_repository),
-    storage: FileStorage = Depends(get_storage),
+    repo: RepoDep,
+    storage: StorageDep,
 ) -> Response:
     """The profile photo's bytes - only when that document belongs to this
     person (their employee or candidate record)."""
@@ -140,7 +177,7 @@ def employee_avatar(
 
 @router.get("/documents")
 def employee_documents(
-    email: EmailQuery, repo: DocumentRepository = Depends(get_repository)
+    email: EmailQuery, repo: RepoDep
 ) -> dict[str, Any]:
     employee = _employee_by_email(repo, email)
     shareable = _shareable_documents(repo, employee)
@@ -154,8 +191,8 @@ def employee_documents(
 def employee_document_content(
     doc_id: str,
     email: EmailQuery,
-    repo: DocumentRepository = Depends(get_repository),
-    storage: FileStorage = Depends(get_storage),
+    repo: RepoDep,
+    storage: StorageDep,
 ) -> Response:
     """The file's bytes - only if it belongs to the employee Avora named, so a
     known document id cannot be used to reach anyone else's file."""

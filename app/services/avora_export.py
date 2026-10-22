@@ -1,4 +1,5 @@
-"""What Circle hands to Avora about one employee: pay, bank and documents.
+"""What Circle hands to Avora about one employee: pay, bank, documents, personal
+and employment details, appraisal history and assets.
 
 This is the ONLY path by which compensation or documents leave Circle, and it
 is deliberately separate from the directory export / id-sync push (which carry
@@ -196,18 +197,75 @@ def buddy_code(onboarding: dict[str, Any] | None) -> str | None:
     return _text((onboarding or {}).get("buddyEmployeeId"))
 
 
-def buddy_email(buddy: dict[str, Any] | None) -> str | None:
-    """The buddy's work email, the key Avora matches people on. A buddy who has
-    since left is not a buddy any more."""
-    if not buddy or buddy.get("status") == "Offboarded":
+def colleague_email(colleague: dict[str, Any] | None) -> str | None:
+    """A colleague's work email, the key Avora matches people on. Someone who
+    has since left is nobody's buddy or manager any more."""
+    if not colleague or colleague.get("status") == "Offboarded":
         return None
-    email = _text(buddy.get("email"))
+    email = _text(colleague.get("email"))
     return email.lower() if email and "@" in email else None
 
 
-def profile_for(employee: dict[str, Any], buddy: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Personal details Avora fills in when it has none (birthday emails and
-    payslips use them), plus the onboarding buddy. Never sent through id-sync."""
+def buddy_email(buddy: dict[str, Any] | None) -> str | None:
+    return colleague_email(buddy)
+
+
+def manager_code(employee: dict[str, Any]) -> str | None:
+    """The reporting manager's employee code, set by Circle's manager picker
+    (older records only carry a typed name, which Avora cannot match)."""
+    return _text(employee.get("reportingManagerId"))
+
+
+# --- ID numbers: only ever leave Circle masked -----------------------------------
+
+_ID_VISIBLE = 4
+# Shorter than this is not a real PAN/Aadhaar/UAN, and masking it would still
+# reveal most of it - send nothing instead.
+_ID_MIN_LENGTH = 8
+_AADHAAR_LENGTH = 12
+_NOT_ALNUM = re.compile(r"[^0-9A-Za-z]")
+
+
+def mask_id_number(value: Any, *, grouped: bool = False) -> str | None:
+    """Everything but the last 4 characters as X ("ABCDE1234F" -> "XXXXXX234F").
+
+    `grouped` writes a 12-digit Aadhaar the way the card does
+    ("XXXX XXXX 1234"). A value already masked here (or by OCR) masks to the
+    same thing, so re-sending is harmless; one with nothing readable left in
+    its last 4 characters is not sent at all.
+    """
+    cleaned = _NOT_ALNUM.sub("", str(value or "")).upper()
+    tail = cleaned[-_ID_VISIBLE:]
+    if len(cleaned) < _ID_MIN_LENGTH or set(tail) == {"X"}:
+        return None
+    if grouped and len(cleaned) == _AADHAAR_LENGTH:
+        return f"XXXX XXXX {tail}"
+    return "X" * (len(cleaned) - _ID_VISIBLE) + tail
+
+
+def latest_uan(requests: list[dict[str, Any]]) -> str | None:
+    """The UAN from the newest document request that carries one."""
+    with_uan = [r for r in requests if _text(r.get("uan"))]
+    newest = max(
+        with_uan,
+        key=lambda r: str(r.get("updatedAt") or r.get("createdAt") or ""),
+        default=None,
+    )
+    return _text(newest.get("uan")) if newest else None
+
+
+def profile_for(
+    employee: dict[str, Any],
+    buddy: dict[str, Any] | None = None,
+    *,
+    manager: dict[str, Any] | None = None,
+    uan: str | None = None,
+) -> dict[str, Any]:
+    """Personal and employment details Avora mirrors (Circle owns them), plus
+    the onboarding buddy and reporting manager. Never sent through id-sync.
+
+    ID numbers are masked HERE, so the full PAN, Aadhaar and UAN never leave
+    Circle."""
     details = employee.get("personalDetails") or {}
     dob = _text(details.get("dateOfBirth"))
     return {
@@ -216,4 +274,67 @@ def profile_for(employee: dict[str, Any], buddy: dict[str, Any] | None = None) -
         "gender": _text(details.get("gender")),
         "avatar_document_id": avatar_document_id(employee),
         "buddy_email": buddy_email(buddy),
+        "manager_code": manager_code(employee),
+        "manager_email": colleague_email(manager),
+        "phone": _text(employee.get("phone")),
+        "personal_email": _text(employee.get("personalEmail")),
+        "address": _text(details.get("address")),
+        "emergency_contact": _text(details.get("emergencyContact")),
+        "employment_type": _text(employee.get("employmentType")),
+        "work_location": _text(employee.get("workLocation")),
+        "pan_masked": mask_id_number(details.get("panNumber")),
+        "aadhaar_masked": mask_id_number(details.get("aadhaarNumber"), grouped=True),
+        "uan_masked": mask_id_number(uan),
     }
+
+
+# --- Appraisal history and assets ----------------------------------------------
+
+
+def _score(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def appraisal_entry(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": _text(record.get("id")),
+        "period": _text(record.get("reviewPeriod")),
+        "status": _text(record.get("status")),
+        "current_salary": _text(record.get("currentSalary")),
+        "revised_salary": _text(record.get("recommendedSalaryRevision")),
+        "effective_date": _text(record.get("effectiveDate")),
+        "score": _score(record.get("performanceScore")),
+    }
+
+
+def appraisals_for(employee: dict[str, Any]) -> list[dict[str, Any]]:
+    """The employee's appraisal history, newest first. Records without an id
+    cannot be tracked across syncs, so they are left out."""
+    history = [a for a in employee.get("appraisalHistory") or [] if isinstance(a, dict)]
+    entries = [appraisal_entry(a) for a in history if _text(a.get("id"))]
+    return sorted(entries, key=lambda e: e["effective_date"] or "", reverse=True)
+
+
+def asset_entry(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": _text(record.get("id")),
+        "name": _text(record.get("assetName")),
+        "type": _text(record.get("assetType")),
+        "serial_number": _text(record.get("serialNumber")),
+        "status": _text(record.get("status")),
+        "assigned_date": _text(record.get("assignmentDate")),
+    }
+
+
+def assets_for(employee: dict[str, Any], assigned: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assets assigned to this person: the asset register's rows (`assigned`)
+    win over copies kept on the employee record, matched by asset id."""
+    by_id: dict[str, dict[str, Any]] = {}
+    embedded = [a for a in employee.get("assets") or [] if isinstance(a, dict)]
+    for record in [*embedded, *assigned]:
+        asset_id = _text(record.get("id"))
+        if asset_id:
+            by_id[asset_id] = asset_entry(record)
+    return sorted(by_id.values(), key=lambda e: e["id"] or "")
