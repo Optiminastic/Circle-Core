@@ -435,7 +435,12 @@ def ongrid_verify(
         bgv["claimDetails"] = body.details.model_dump(exclude_none=True)
     bgv["ongridDocumentIds"] = document_ids
     bgv["ongridDocumentIdsFor"] = individual_id
-    bgv["ongridChecks"] = outcomes
+    # Merged by code, not replaced: a later send often retries only the checks
+    # that failed to start, and overwriting the whole list would lose the
+    # reasons recorded for everything not included in that smaller retry.
+    merged_checks = {o["code"]: o for o in (bgv.get("ongridChecks") or [])}
+    merged_checks.update({o["code"]: o for o in outcomes})
+    bgv["ongridChecks"] = list(merged_checks.values())
     if started:
         bgv["ongridVerificationsSentAt"] = _now()
         bgv.setdefault("verificationTimeline", []).append({
