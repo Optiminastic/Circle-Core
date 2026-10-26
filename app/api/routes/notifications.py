@@ -172,6 +172,11 @@ class CustomEmailIn(BaseModel):
     attachmentName: str | None = None
     attachmentBase64: str | None = None
     attachmentType: str | None = None
+    # When True, send from the plain notification address (settings.
+    # notification_from_email) instead of the general From address — used for
+    # candidate-facing results emails like a rejection, which should come from
+    # notification@, not whatever the general sender is configured as.
+    fromNotification: bool = False
 
 
 @router.post("/custom-email")
@@ -217,6 +222,7 @@ def custom_email(
             if payload.attachmentBase64
             else None
         ),
+        from_email=settings.notification_from_email if payload.fromNotification else None,
     )
     if sent:
         audit.record(
