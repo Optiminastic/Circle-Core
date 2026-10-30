@@ -101,6 +101,27 @@ class Settings(BaseSettings):
     # reference schema. Until it is set, PRC is the one check that cannot run;
     # everything else is unaffected.
     ongrid_prc_schema_id: int | None = None
+    # The exact consentText OnGrid validates against for this community - they
+    # reject anything that doesn't match character for character. This is sent
+    # on every onboard call, regardless of what wording a given candidate's own
+    # record happens to have stored (older candidates may carry a since-fixed
+    # typo'd version - see git history). The per-candidate `consent.text` stays
+    # the audit record of what that candidate actually agreed to; this is only
+    # what we transmit. Override via env if OnGrid ever reissues the wording.
+    ongrid_consent_text: str = (
+        "The Individual does not and will not have any objection to Optiminastic "
+        "sharing the Individual's personal information and/or documents, including "
+        "but not limited to name, gender, date of birth, addresses, mobile number, "
+        "email, education record, employment record, Aadhaar number, other "
+        "government-issued IDs such as Voter ID, PAN card, driving license, etc. "
+        "(collectively Proprietary Information) with OnGrid (Handy Online Solutions "
+        "Private Limited) for the purpose of background checks and verification. "
+        "The individual understands that OnGrid maintains Proprietary Information "
+        "on its platform in a secure manner, and it will only be accessible to "
+        "Optiminastic and it's associates/partners/affiliates, and will not be "
+        "shared with any other individual or organization without the Individual's "
+        "explicit consent."
+    )
 
     # AI screening calls via Vapi (app/services/vapi.py). HR starts a call and
     # Vapi reports back to /api/vapi/webhook. The private key places phone

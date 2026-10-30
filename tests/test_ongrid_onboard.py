@@ -130,6 +130,23 @@ def test_a_first_onboard_creates_the_individual(client: Any) -> None:
     assert len(client.created) == 1
 
 
+def test_consent_text_sent_is_the_canonical_one_not_the_candidates_stored_text(
+    client: Any,
+) -> None:
+    # DOC_REQUEST.consent.text is "I agree." - a stand-in for an older
+    # candidate's snapshot that predates a wording fix. OnGrid validates
+    # consentText against its own configured string, so what we send must
+    # always be the current one from settings, never that per-candidate text.
+    from app.core.config import Settings
+
+    repo = _Repo(None)
+    _onboard(repo)
+
+    sent = client.created[0]["consentText"]
+    assert sent == Settings().ongrid_consent_text
+    assert sent != DOC_REQUEST["consent"]["text"]
+
+
 def _ours(**extra: Any) -> dict[str, Any]:
     """A BGV already onboarded into the community we are configured for."""
     return {

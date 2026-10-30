@@ -468,7 +468,6 @@ def ongrid_onboard(
         raise NotFoundError("Candidate not found.")
 
     doc_request = _pick_doc_request(repo, candidate_id)
-    consent = (doc_request or {}).get("consent") or {}
     if not has_consent(doc_request or {}):
         # OnGrid mandates consent (error 157 otherwise); we require the
         # candidate's recorded portal consent before sending any PII.
@@ -486,7 +485,14 @@ def ongrid_onboard(
         "gender": gender,
         "phone": _phone_digits(candidate.get("phone") or ""),
         "hasConsent": True,
-        "consentText": consent["text"],
+        # Always the current canonical wording from settings, never the
+        # per-candidate `consent.text` snapshot - OnGrid validates this
+        # character-for-character against their own configured string, and a
+        # candidate's stored text can predate a wording fix (see
+        # Settings.ongrid_consent_text). `has_consent()` above already
+        # confirmed the candidate agreed to something; this is what we tell
+        # OnGrid they agreed to.
+        "consentText": settings.ongrid_consent_text,
     }
     if candidate.get("email"):
         payload["email"] = candidate["email"]
