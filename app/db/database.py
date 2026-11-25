@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings
 from app.core.errors import RepositoryError
 from app.core.logging import get_logger
+from app.core.perf import instrument_engine
 from app.repositories import identity_outbox_repository as identity_outbox
 
 logger = get_logger("curcle.db")
@@ -103,6 +104,7 @@ class Database:
                 future=True,
             )
             self._session_factory = sessionmaker(bind=self._engine, expire_on_commit=False, future=True)
+            instrument_engine(self._engine)
             logger.info("Database engine initialized.")
         except SQLAlchemyError as exc:  # pragma: no cover - defensive
             logger.exception("Failed to initialize database engine: %s", exc)
