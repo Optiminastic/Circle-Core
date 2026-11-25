@@ -43,6 +43,7 @@ from app.services.resource_service import ResourceService
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
+from app.core.perf import install_request_timing
 from app.core.rate_limit import SlidingWindowRateLimiter, client_ip, is_exempt_origin
 from app.db.database import Database
 from app.domain.registry import all_tables
@@ -257,6 +258,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Added last = outermost in Starlette's middleware stack, so it times the
+    # FULL request (including the CORS/GZip/rate-limit overhead above), not
+    # just the route handler. Phase-0 observability only — see docs/PERFORMANCE_BASELINE.md.
+    install_request_timing(app)
 
     register_exception_handlers(app)
     app.include_router(meta.router)
