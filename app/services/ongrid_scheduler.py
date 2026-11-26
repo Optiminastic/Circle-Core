@@ -88,24 +88,37 @@ class OngridSyncScheduler:
             await asyncio.sleep(self._interval)
 
     def _enqueue_due(self) -> int:
+        # Find-due with a short-lived session, then release it BEFORE
+        # enqueueing. Production incident (2026-11-26): this used to run
+        # the whole batch - the find-due query AND every candidate's
+        # enqueue() call (each itself 1-2 round trips: an idempotency-key
+        # check, then an INSERT) - inside one `with database.session()`
+        # block. With up to 200 due candidates (production has 2,468
+        # candidates; most had no ongridStatusAt yet, so a large first
+        # batch was genuinely due at once), that's up to ~400 sequential
+        # round trips held in a single session - observed live:
+        # db_connection_held warnings of 18.9s, 50.5s, and 214.1s,
+        # starving the connection pool for everyone else. Same fix shape
+        # as job_worker.py and identity_sync_worker.py: release between
+        # steps, never hold one connection across many sequential
+        # operations - whether the "many operations" are external HTTP
+        # calls (those fixes) or, as here, many individual DB round trips.
         with self._database.session() as session:
             candidate_ids = _find_due_candidate_ids(
                 session, str(self._settings.ongrid_community_id or ""), self._stale_after
             )
-            if not candidate_ids:
-                return 0
-            job_repo = JobRepository(session)
-            for candidate_id in candidate_ids:
-                # Idempotency key has no time component: while a sync for
-                # this candidate is queued/processing, a second scheduler
-                # tick finds the SAME existing job instead of piling up
-                # duplicates. Once it completes, ongridStatusAt is fresh
-                # again, so this candidate drops out of _find_due_candidate_ids
-                # until it goes stale once more - no need to roll the key.
-                job_repo.enqueue(
+        for candidate_id in candidate_ids:
+            # Idempotency key has no time component: while a sync for
+            # this candidate is queued/processing, a second scheduler
+            # tick finds the SAME existing job instead of piling up
+            # duplicates. Once it completes, ongridStatusAt is fresh
+            # again, so this candidate drops out of _find_due_candidate_ids
+            # until it goes stale once more - no need to roll the key.
+            with self._database.session() as session:
+                JobRepository(session).enqueue(
                     "ongrid_status_sync",
                     {"candidateId": candidate_id},
                     idempotency_key=f"ongrid-sync:{candidate_id}",
                     max_attempts=3,
                 )
-            return len(candidate_ids)
+        return len(candidate_ids)
