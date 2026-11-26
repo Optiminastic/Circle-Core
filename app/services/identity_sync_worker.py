@@ -13,8 +13,8 @@ from contextlib import suppress
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.db.database import Database
-from app.repositories.identity_outbox_repository import IdentityOutboxRepository
-from app.services.identity_sync import IdentitySyncClient, IdentitySyncService
+from app.repositories.identity_outbox_repository import IdentityOutboxRepository, OutboxItem
+from app.services.identity_sync import IdentitySyncClient, IdentitySyncError, retry_delay_seconds
 
 logger = get_logger("curcle.identity_sync")
 
@@ -46,6 +46,42 @@ class IdentitySyncWorker:
             await asyncio.sleep(self._interval)
 
     def _deliver_due(self) -> int:
+        # Claim with a short-lived session, then release it BEFORE sending
+        # anything. Production incident (2026-11-26): this used to run the
+        # whole batch - claim AND every item's client.send() (external HTTP,
+        # up to 10s each, CLAIM_BATCH_SIZE=10 items) - inside one
+        # `with database.session()` block, so a single pass could hold a
+        # pooled connection for minutes (observed live: a single
+        # db_connection_held of 371.9s), starving every other request on
+        # that uvicorn worker. Same fix shape as app/services/job_worker.py's
+        # Phase 3 fix and app/api/routes/bgv_ongrid.py's sync_ongrid_status:
+        # release before the slow external work, reacquire only to persist
+        # each result. IdentitySyncService.deliver_due() (still correct,
+        # still covered by tests/test_identity_sync.py's single-session
+        # scenarios) is intentionally NOT reused here for that reason - this
+        # loop needs per-item session boundaries, not one for the batch.
         with self._database.session() as session:
-            service = IdentitySyncService(IdentityOutboxRepository(session), self._client)
-            return service.deliver_due()
+            items = IdentityOutboxRepository(session).claim_due(
+                limit=10, lease_seconds=600  # CLAIM_BATCH_SIZE / CLAIM_LEASE_SECONDS, see identity_sync.py
+            )
+        delivered = 0
+        for item in items:
+            if self._deliver_one(item):
+                delivered += 1
+        return delivered
+
+    def _deliver_one(self, item: OutboxItem) -> bool:
+        try:
+            self._client.send(item.payload)
+        except IdentitySyncError as exc:
+            delay = retry_delay_seconds(item.attempts)
+            logger.warning(
+                "id-sync push for %s failed (attempt %d), retrying in %ds: %s",
+                item.employee_id, item.attempts + 1, delay, exc,
+            )
+            with self._database.session() as session:
+                IdentityOutboxRepository(session).mark_failed(item, error=str(exc), retry_in_seconds=delay)
+            return False
+        with self._database.session() as session:
+            IdentityOutboxRepository(session).mark_delivered(item)
+        return True

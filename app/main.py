@@ -24,11 +24,13 @@ from app.api.routes import (
     candidate_delete,
     candidate_handoff,
     candidate_promote,
+    candidate_search,
     doc_requests,
     documents,
     employee_codes,
     exit_handover,
     interview_public,
+    job_search,
     joining_confirmations,
     meta,
     notifications,
@@ -337,6 +339,11 @@ def create_app() -> FastAPI:
     # through to the generic router).
     app.include_router(candidate_delete.router)
     app.include_router(candidate_promote.router)
+    # GET /api/candidates/search and /api/jobs/search must precede the
+    # generic resources router so they win over /api/{resource}/{item_id}
+    # treating "search" as a candidate/job id.
+    app.include_router(candidate_search.router)
+    app.include_router(job_search.router)
     # AI screening calls (HR) and Vapi's call events - literal paths, before the
     # generic /api/{resource} router.
     app.include_router(screening_calls.router)

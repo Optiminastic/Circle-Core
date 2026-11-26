@@ -15,7 +15,10 @@ from __future__ import annotations
 #: Resource slug -> JSONB fields `search=` matches against (ILIKE, OR'd).
 SEARCH_FIELDS: dict[str, tuple[str, ...]] = {
     "candidates": ("fullName", "email", "phone", "appliedRole", "currentCompany"),
-    "employees": ("fullName", "email", "department", "designation"),
+    # "designation" was never a real field on Employee (the stored field is
+    # "role") - this entry matched nothing since Phase 2 introduced it. Found
+    # and fixed while wiring EmployeeDirectoryView to server-side pagination.
+    "employees": ("fullName", "email", "department", "role"),
     "jobs": ("title", "department", "location"),
     "interviews": ("candidateName", "appliedRole"),
     "doc-requests": ("candidateName", "email"),
@@ -30,6 +33,16 @@ SORTABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "jobs": ("title", "status"),
     "interviews": ("scheduledAt",),
     "doc-requests": ("status", "expiresAt"),
+}
+
+#: Resource slug -> JSONB fields a caller may filter on by EXACT match, as a
+#: plain query param named after the field (e.g. `?department=Engineering`).
+#: Allowlisted deliberately (not "any field the client sends") - see
+#: ResourceService.list_paginated's own docstring on why every identifier
+#: that varies per call is still bound, never trusted blindly just because
+#: it's checked against a list first.
+FILTERABLE_FIELDS: dict[str, tuple[str, ...]] = {
+    "employees": ("department",),
 }
 
 DEFAULT_SORT_FIELD = "createdAt"
@@ -50,3 +63,7 @@ def search_fields_for(resource_slug: str) -> tuple[str, ...]:
 
 def sortable_fields_for(resource_slug: str) -> frozenset[str]:
     return frozenset({DEFAULT_SORT_FIELD, *SORTABLE_FIELDS.get(resource_slug, ())})
+
+
+def filterable_fields_for(resource_slug: str) -> tuple[str, ...]:
+    return FILTERABLE_FIELDS.get(resource_slug, ())

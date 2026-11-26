@@ -14,6 +14,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from app.api.dependencies import current_user, get_audit_service, get_identity_sync, get_resource_service
 from app.core.cache import dashboard_cache
 from app.core.config import Settings, get_settings
+from app.domain import resource_search
 from app.domain.registry import get_resource
 from app.services.audit_service import AuditService
 from app.services.identity_sync import IdentitySyncService
@@ -201,6 +202,7 @@ def _sync_employee(
 
 @router.get("/{resource}")
 def list_all(
+    request: Request,
     resource: str,
     limit: int | None = None,
     offset: int = 0,
@@ -241,9 +243,21 @@ def list_all(
             search=search,
             sort_by=sortBy,
             sort_order=sortOrder,
+            filters=_extract_filters(resource, request),
         )
         return result.to_dict()
     return service.list(get_resource(resource), limit=limit, offset=offset)
+
+
+def _extract_filters(resource: str, request: Request) -> Document | None:
+    """Plain query params that exact-match an allowlisted JSONB field for
+    this resource (e.g. `?department=Engineering`) — never an arbitrary
+    client-supplied field. See `app.domain.resource_search.FILTERABLE_FIELDS`."""
+    allowed = resource_search.filterable_fields_for(resource)
+    if not allowed:
+        return None
+    filters = {field: value for field in allowed if (value := request.query_params.get(field))}
+    return filters or None
 
 
 @router.get("/{resource}/{item_id}")
