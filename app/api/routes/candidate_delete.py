@@ -18,14 +18,17 @@ from fastapi import APIRouter, Depends, Response
 from app.api.dependencies import (
     get_audit_service,
     get_google_calendar_service,
+    get_job_repository,
     get_repository,
     get_storage,
     require_user,
 )
 from app.api.routes.calendar import cleanup_calendar_events
+from app.core.cache import dashboard_cache
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.repositories.base import DocumentRepository
+from app.repositories.job_repository import JobRepository
 from app.services.audit_service import AuditService
 from app.services.google_calendar import GoogleCalendarService
 from app.storage.base import FileStorage
@@ -59,6 +62,7 @@ def delete_candidate(
     settings: Settings = Depends(get_settings),
     user: dict = Depends(require_user),
     audit: AuditService = Depends(get_audit_service),
+    job_repo: JobRepository = Depends(get_job_repository),
 ) -> Response:
     removed = 0
     # Capture the candidate's name before the cascade removes the record, so the
@@ -85,7 +89,7 @@ def delete_candidate(
                 removed += 1
     # Remove the linked Google Calendar events (best-effort — never blocks delete).
     try:
-        cleanup_calendar_events(repo, calendar, settings, calendar_event_ids)
+        cleanup_calendar_events(repo, calendar, settings, calendar_event_ids, job_repo=job_repo)
     except Exception:  # noqa: BLE001
         logger.warning("Calendar cleanup failed during delete of candidate %s", candidate_id)
     # Records keyed directly by candidateId (no-op when absent).
@@ -115,4 +119,5 @@ def delete_candidate(
         entity_label=candidate_label,
         metadata={"related_removed": removed},
     )
+    dashboard_cache.invalidate("stats:overview")
     return Response(status_code=204)

@@ -36,6 +36,17 @@ class DocumentRepository(Protocol):
         sort_desc: bool = False,
     ) -> tuple[list[Document], int]: ...
 
+    def list_cursor_paginated(
+        self,
+        table: str,
+        *,
+        limit: int,
+        cursor: str | None = None,
+        search: str | None = None,
+        search_fields: tuple[str, ...] = (),
+        sort_desc: bool = True,
+    ) -> tuple[list[Document], str | None]: ...
+
     def get(self, table: str, item_id: str) -> Document | None: ...
 
     def get_many(self, table: str, item_ids: list[str]) -> dict[str, Document]: ...

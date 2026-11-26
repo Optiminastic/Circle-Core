@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from app.core.errors import NotFoundError
+from app.core.errors import NotFoundError, ValidationError
 from app.domain import resource_search
 from app.domain.registry import ResourceDef
 from app.repositories.base import Document, DocumentRepository
@@ -57,6 +57,27 @@ class Page:
         }
 
 
+@dataclass(frozen=True)
+class CursorPage:
+    """The `{data, pagination}` contract for keyset (cursor) pagination —
+    a sibling of `Page`'s OFFSET contract, not a replacement. No `total`:
+    a keyset page never counts the whole table (that's the point)."""
+
+    data: list[Document]
+    next_cursor: str | None
+    limit: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "data": self.data,
+            "pagination": {
+                "limit": self.limit,
+                "nextCursor": self.next_cursor,
+                "hasNextPage": self.next_cursor is not None,
+            },
+        }
+
+
 class ResourceService:
     def __init__(self, repository: DocumentRepository) -> None:
         self._repo = repository
@@ -100,6 +121,32 @@ class ResourceService:
             sort_desc=sort_desc,
         )
         return Page(data=data, page=page, limit=limit, total=total)
+
+    def list_cursor_paginated(
+        self,
+        resource: ResourceDef,
+        *,
+        limit: int = PAGE_SIZE_DEFAULT,
+        cursor: str | None = None,
+        search: str | None = None,
+    ) -> CursorPage:
+        """Keyset pagination — see docs/PERFORMANCE_IMPLEMENTATION_LOG.md
+        Phase 3. Always newest-first (`sort_desc=True`); unlike
+        `list_paginated` there's no arbitrary sort field to validate."""
+        limit = max(1, min(limit, PAGE_SIZE_MAX))
+        search_fields = resource_search.search_fields_for(resource.slug)
+        try:
+            data, next_cursor = self._repo.list_cursor_paginated(
+                resource.table,
+                limit=limit,
+                cursor=cursor,
+                search=search if (search and search_fields) else None,
+                search_fields=search_fields,
+                sort_desc=True,
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return CursorPage(data=data, next_cursor=next_cursor, limit=limit)
 
     def find(
         self, resource: ResourceDef, match: Document, *, limit: int | None = None, offset: int = 0

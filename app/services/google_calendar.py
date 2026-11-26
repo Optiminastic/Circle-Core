@@ -23,6 +23,7 @@ from googleapiclient.discovery import build
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.resilience import CircuitBreaker
 
 # Google sometimes returns a superset of the requested scopes (e.g. it folds in
 # the granted calendar scope); relax oauthlib so that does not raise on exchange.
@@ -46,6 +47,12 @@ _TIME_ZONE = "Asia/Kolkata"
 #: as Google takes to respond (or forever on a dropped connection). See
 #: docs/PERFORMANCE_AUDIT.md P1-5.
 _HTTP_TIMEOUT_SECONDS = 15
+
+# Process-global (per uvicorn worker). Wrapped around the token refresh
+# below — every Google Calendar operation goes through _credentials() first,
+# so this one chokepoint covers push, delete, and the OAuth-connect email
+# lookup alike. See docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phase 3 C4.
+_CIRCUIT = CircuitBreaker(name="google-calendar", failure_threshold=5, reset_timeout_seconds=60.0)
 
 
 class GoogleCalendarService:
@@ -112,7 +119,11 @@ class GoogleCalendarService:
             client_secret=self._client_secret,
             scopes=SCOPES,
         )
-        creds.refresh(GoogleRequest())
+        # Circuit-breaker-wrapped: this one call gates every Calendar
+        # operation (push, delete, OAuth-connect email lookup), so it's the
+        # single chokepoint worth protecting rather than wrapping each
+        # .execute() call site individually.
+        _CIRCUIT.call(lambda: creds.refresh(GoogleRequest()))
         return creds
 
     def _service(self, refresh_token: str):

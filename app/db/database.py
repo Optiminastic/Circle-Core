@@ -22,6 +22,7 @@ from app.core.errors import RepositoryError
 from app.core.logging import get_logger
 from app.core.perf import instrument_engine
 from app.repositories import identity_outbox_repository as identity_outbox
+from app.repositories import job_repository
 from app.repositories.base import DocumentRepository
 from app.repositories.document_repository import SqlAlchemyDocumentRepository
 
@@ -226,3 +227,17 @@ class Database:
                 conn.execute(text(identity_outbox.INDEX_DDL))
         except SQLAlchemyError as exc:
             logger.exception("Failed to ensure identity outbox: %s", exc)
+
+    def ensure_job_queue(self) -> None:
+        """Create the background job queue table. See
+        app/repositories/job_repository.py and
+        docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phase 3."""
+        if self._engine is None:
+            return
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(text(job_repository.TABLE_DDL))
+                for index_ddl in job_repository.INDEX_DDL:
+                    conn.execute(text(index_ddl))
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to ensure job queue: %s", exc)

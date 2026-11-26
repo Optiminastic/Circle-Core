@@ -20,6 +20,7 @@ from app.repositories.identity_outbox_repository import IdentityOutboxRepository
 from app.repositories.base import DocumentRepository
 from app.repositories.document_repository import SqlAlchemyDocumentRepository
 from app.repositories.stats_repository import StatsRepository
+from app.repositories.job_repository import JobRepository
 from app.services.audit_service import AuditService
 from app.services.identity_sync import IdentitySyncService
 from app.services.google_calendar import GoogleCalendarService
@@ -61,6 +62,10 @@ def get_resource_service(repo: DocumentRepository = Depends(get_repository)) -> 
 
 def get_stats_repository(session: Session = Depends(get_session)) -> StatsRepository:
     return StatsRepository(session)
+
+
+def get_job_repository(session: Session = Depends(get_session)) -> JobRepository:
+    return JobRepository(session)
 
 
 def get_audit_service(session: Session = Depends(get_session)) -> AuditService:
