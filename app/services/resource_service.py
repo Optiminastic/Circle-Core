@@ -22,6 +22,15 @@ class ResourceService:
     ) -> list[Document]:
         return self._repo.list(resource.table, limit=limit, offset=offset)
 
+    def find(
+        self, resource: ResourceDef, match: Document, *, limit: int | None = None, offset: int = 0
+    ) -> list[Document]:
+        """Filtered list via indexed JSONB containment — see
+        DocumentRepository.find. Prefer this over `list()` + a Python filter
+        whenever the match is a simple field equality (see
+        docs/PERFORMANCE_AUDIT.md P1-4)."""
+        return self._repo.find(resource.table, match, limit=limit, offset=offset)
+
     def get(self, resource: ResourceDef, item_id: str) -> Document:
         item = self._repo.get(resource.table, item_id)
         if item is None:

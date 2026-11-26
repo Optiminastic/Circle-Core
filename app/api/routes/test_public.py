@@ -342,7 +342,7 @@ def submit_link(
 
 
 @router.post("/{token}/submit-file")
-async def submit_file(
+def submit_file(
     token: str,
     file: UploadFile = File(...),
     service: ResourceService = Depends(get_resource_service),
@@ -360,7 +360,9 @@ async def submit_file(
     invite = _load(service, token)
     _take_home_open(invite)
 
-    data = await file.read()
+    # Plain `def`: thread-pooled by Starlette instead of blocking the event
+    # loop for the storage/DB calls below. See docs/PERFORMANCE_AUDIT.md P0-1.
+    data = file.file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Please attach a file.")
     limit = settings.max_upload_mb * 1024 * 1024

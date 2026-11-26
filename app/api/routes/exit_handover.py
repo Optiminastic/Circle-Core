@@ -148,7 +148,7 @@ def submit_credentials(
 
 
 @router.post("/portal/{token}/upload", status_code=201)
-async def upload(
+def upload(
     token: str,
     file: UploadFile = File(...),
     repo: DocumentRepository = Depends(get_repository),
@@ -160,7 +160,9 @@ async def upload(
     if _is_expired(rec):
         raise ValidationError("This handover link has expired. Please ask HR for a new one.")
 
-    data = await file.read()
+    # Plain `def`: thread-pooled by Starlette instead of blocking the event
+    # loop for the storage/DB calls below. See docs/PERFORMANCE_AUDIT.md P0-1.
+    data = file.file.read()
     if not data:
         raise ValidationError("Empty file.")
     limit = settings.max_upload_mb * 1024 * 1024

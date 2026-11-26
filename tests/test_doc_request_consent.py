@@ -101,14 +101,21 @@ class _Storage:
 
 
 class _Upload:
+    """Minimal stand-in for Starlette's UploadFile.
+
+    The route is now a plain `def` (thread-pooled, not async — see
+    docs/PERFORMANCE_AUDIT.md P0-1), and reads the upload synchronously via
+    `file.file.read()`, so this only needs to expose `.file` as a real
+    sync-readable object, not an async `read()` method.
+    """
+
     filename = "pan.pdf"
     content_type = "application/pdf"
 
     def __init__(self, data: bytes = b"") -> None:
-        self._data = data
+        import io
 
-    async def read(self) -> bytes:
-        return self._data
+        self.file = io.BytesIO(data)
 
 
 def _request(consent: dict[str, Any] | None) -> dict[str, Any]:
@@ -123,20 +130,16 @@ def _request(consent: dict[str, Any] | None) -> dict[str, Any]:
 
 def _upload(record: dict[str, Any], storage: _Storage, data: bytes = b"") -> None:
     """Call the route directly, the way a token holder bypassing the UI would."""
-    import asyncio
-
     from app.api.routes.doc_requests import upload_request_document
     from app.core.config import get_settings
 
-    asyncio.run(
-        upload_request_document(
-            token="tok",
-            docType="PAN Card",
-            file=_Upload(data),  # type: ignore[arg-type]
-            repo=_Repo(record),  # type: ignore[arg-type]
-            storage=storage,  # type: ignore[arg-type]
-            settings=get_settings(),
-        )
+    upload_request_document(
+        token="tok",
+        docType="PAN Card",
+        file=_Upload(data),  # type: ignore[arg-type]
+        repo=_Repo(record),  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        settings=get_settings(),
     )
 
 
@@ -198,18 +201,14 @@ def test_a_signed_letter_upload_is_not_stopped_by_the_consent_gate(kind: str) ->
 
 
 def _upload_doc(record: dict[str, Any], doc_type: str, storage: _Storage) -> None:
-    import asyncio
-
     from app.api.routes.doc_requests import upload_request_document
     from app.core.config import get_settings
 
-    asyncio.run(
-        upload_request_document(
-            token="tok",
-            docType=doc_type,
-            file=_Upload(b""),  # type: ignore[arg-type]
-            repo=_Repo(record),  # type: ignore[arg-type]
-            storage=storage,  # type: ignore[arg-type]
-            settings=get_settings(),
-        )
+    upload_request_document(
+        token="tok",
+        docType=doc_type,
+        file=_Upload(b""),  # type: ignore[arg-type]
+        repo=_Repo(record),  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        settings=get_settings(),
     )
