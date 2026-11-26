@@ -18,6 +18,7 @@ from app.api.routes import (
     audit,
     auth,
     avora_internal,
+    background_jobs,
     bgv_ongrid,
     calendar,
     candidate_delete,
@@ -49,6 +50,12 @@ from app.core.rate_limit import SlidingWindowRateLimiter, client_ip, is_exempt_o
 from app.db.database import Database
 from app.domain.registry import all_tables
 from app.services.identity_sync_worker import IdentitySyncWorker
+from app.services.job_handlers import (
+    make_calendar_cleanup_retry_handler,
+    make_ongrid_status_sync_handler,
+)
+from app.services.job_worker import JobWorker
+from app.services.ongrid_scheduler import OngridSyncScheduler
 from app.storage.s3_storage import S3FileStorage
 
 logger = get_logger("curcle.main")
@@ -78,6 +85,7 @@ def create_app() -> FastAPI:
             # on their next successful login).
             auth.seed_admin_accounts(database)
             database.ensure_identity_outbox()
+            database.ensure_job_queue()
         app.state.database = database
 
         identity_sync: IdentitySyncWorker | None = None
@@ -86,6 +94,27 @@ def create_app() -> FastAPI:
             identity_sync.start()
         else:
             logger.info("id-sync push disabled (IDSYNC_PUSH_URL / INTERNAL_API_SECRET unset).")
+
+        # Phase 3 — Postgres-backed background jobs (no Redis, no new
+        # containers; see docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phase 3).
+        job_worker: JobWorker | None = None
+        ongrid_scheduler: OngridSyncScheduler | None = None
+        if database.is_ready:
+            job_worker = JobWorker(database, settings)
+            job_worker.register(
+                "calendar_cleanup_retry", make_calendar_cleanup_retry_handler(database, settings)
+            )
+            job_worker.register(
+                "ongrid_status_sync",
+                make_ongrid_status_sync_handler(database, settings),
+                timeout_seconds=45,  # one OnGrid HTTP call
+            )
+            job_worker.start()
+            if settings.ongrid_community_id:
+                ongrid_scheduler = OngridSyncScheduler(database, settings)
+                ongrid_scheduler.start()
+        else:
+            logger.info("Background job worker disabled (database not ready).")
 
         if settings.has_storage:
             app.state.storage = S3FileStorage(settings)
@@ -98,6 +127,10 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            if ongrid_scheduler is not None:
+                await ongrid_scheduler.stop()
+            if job_worker is not None:
+                await job_worker.stop()
             if identity_sync is not None:
                 await identity_sync.stop()
             database.dispose()
@@ -281,6 +314,10 @@ def create_app() -> FastAPI:
     app.include_router(audit.router)
     # Dashboard aggregates (/api/stats/*) — literal path, before the generic router.
     app.include_router(stats.router)
+    # Background job status/retry (/api/background-jobs/*) — literal path,
+    # before the generic router, and deliberately NOT "/api/jobs" (job
+    # postings already own that path).
+    app.include_router(background_jobs.router)
     # Hardened public router must precede the generic resources router so its
     # literal /api/public/* paths win over "/api/{resource}".
     app.include_router(public.router)

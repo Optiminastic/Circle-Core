@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from app.api.dependencies import current_user, get_audit_service, get_identity_sync, get_resource_service
+from app.core.cache import dashboard_cache
 from app.core.config import Settings, get_settings
 from app.domain.registry import get_resource
 from app.services.audit_service import AuditService
@@ -204,20 +205,34 @@ def list_all(
     limit: int | None = None,
     offset: int = 0,
     page: int | None = None,
+    cursor: str | None = None,
     search: str | None = None,
     sortBy: str | None = None,
     sortOrder: str = "asc",
     service: ResourceService = Depends(get_resource_service),
 ) -> list[Document] | dict[str, Any]:
-    # `page` opts into the new {data, pagination} contract (database-side
+    # Three pagination modes, all opt-in — the bare, byte-for-byte-unchanged
+    # array stays the default since circle-be (Coolify) and circle-fe
+    # (Vercel) deploy independently, so an old frontend build must keep
+    # working against a new backend until it's redeployed too. See
+    # docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phases 2 and 3.
+    #
+    # `cursor` (or an explicit empty string for the FIRST page) opts into
+    # keyset pagination: no OFFSET-N row-skipping cost on a deep page, and
+    # stable under concurrent inserts — pass it before `page`, since both
+    # could technically be given at once and cursor mode is the one meant
+    # for the large, hot tables (candidates) this was built for.
+    if cursor is not None:
+        result = service.list_cursor_paginated(
+            get_resource(resource),
+            limit=limit if limit is not None else PAGE_SIZE_DEFAULT,
+            cursor=cursor or None,
+            search=search,
+        )
+        return result.to_dict()
+    # `page` opts into the OFFSET {data, pagination} contract (database-side
     # LIMIT/OFFSET, search, sort - see docs/PERFORMANCE_AUDIT.md P0-2 and
-    # ResourceService.list_paginated). Without it, behavior is byte-for-byte
-    # unchanged from before this phase: a bare array, optional limit/offset.
-    # Deliberately opt-in, not a breaking change to every existing caller at
-    # once - circle-be (Coolify) and circle-fe (Vercel) deploy independently,
-    # so the old frontend build must keep working against the new backend
-    # until it's redeployed with the migrated client. See
-    # docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phase 2.
+    # ResourceService.list_paginated).
     if page is not None:
         result = service.list_paginated(
             get_resource(resource),
@@ -248,6 +263,7 @@ def create(
     created = service.create(get_resource(resource), payload)
     _audit_create(audit, user, resource, created)
     _sync_employee(identity_sync, resource, created)
+    _invalidate_dashboard_cache(resource)
     return created
 
 
@@ -261,6 +277,7 @@ def replace(
 ) -> Document:
     replaced = service.replace(get_resource(resource), item_id, payload)
     _sync_employee(identity_sync, resource, replaced)
+    _invalidate_dashboard_cache(resource)
     return replaced
 
 
@@ -279,7 +296,19 @@ def patch(
     updated = service.patch(get_resource(resource), item_id, changes)
     _audit_patch(audit, user, resource, item_id, changes, updated)
     _sync_employee(identity_sync, resource, updated)
+    _invalidate_dashboard_cache(resource)
     return updated
+
+
+#: Resources /api/stats/overview actually reads from (see stats.py:compute).
+#: Writing any other resource (interviews, bgvs, doc_requests, ...) doesn't
+#: change those numbers, so it doesn't need to invalidate the cache.
+_DASHBOARD_OVERVIEW_RESOURCES = frozenset({"jobs", "candidates", "employees"})
+
+
+def _invalidate_dashboard_cache(resource: str) -> None:
+    if resource in _DASHBOARD_OVERVIEW_RESOURCES:
+        dashboard_cache.invalidate("stats:overview")
 
 
 def _reject_non_public_fields(resource: str, changes: Document) -> None:
@@ -311,4 +340,5 @@ def remove(
     service.delete(resource_def, item_id)
     if removed is not None:
         _sync_employee(identity_sync, resource, removed, removed=True)
+    _invalidate_dashboard_cache(resource)
     return Response(status_code=204)

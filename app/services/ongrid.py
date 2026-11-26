@@ -33,6 +33,7 @@ from typing import Any
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.resilience import CircuitBreaker, CircuitOpenError, retry_with_backoff
 
 logger = get_logger("curcle.ongrid")
 
@@ -40,6 +41,12 @@ logger = get_logger("curcle.ongrid")
 UploadFile = tuple[str, bytes, str | None]
 
 _TIMEOUT = 30
+
+# Process-global (per uvicorn worker) — shared across every OnGridClient
+# instance, since a client is constructed fresh per request but the
+# downstream service's health doesn't reset per request. See
+# docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phase 3 C4.
+_CIRCUIT = CircuitBreaker(name="ongrid", failure_threshold=5, reset_timeout_seconds=60.0)
 _HTTP_USER_AGENT = "Mozilla/5.0 (compatible; CurcleBackend/1.0; +https://optiminastic.com)"
 
 # How each of our joining-document types is attached to an OnGrid individual.
@@ -94,14 +101,30 @@ class OnGridClient:
         req = urllib.request.Request(
             f"{self._base}{path}", data=body, headers=headers, method=method
         )
+
+        def _do_request() -> str:
+            try:
+                # `timeout` here bounds BOTH connect and read as one figure —
+                # urllib (stdlib, no new dependency) has no split
+                # connect-vs-read timeout, unlike requests/httpx. 30s is
+                # already a deliberate, generous single bound; splitting it
+                # further isn't worth a new HTTP library dependency for this.
+                with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310 (fixed host)
+                    return resp.read().decode("utf-8", "replace")
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")[:500]
+                raise OnGridError(f"OnGrid {exc.code}: {detail}", status=exc.code) from exc
+            except urllib.error.URLError as exc:
+                raise OnGridError(f"Could not reach OnGrid: {exc.reason}") from exc
+
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310 (fixed host)
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:500]
-            raise OnGridError(f"OnGrid {exc.code}: {detail}", status=exc.code) from exc
-        except urllib.error.URLError as exc:
-            raise OnGridError(f"Could not reach OnGrid: {exc.reason}") from exc
+            raw = _CIRCUIT.call(_do_request)
+        except CircuitOpenError as exc:
+            # Converted to OnGridError so no caller needs to know about the
+            # circuit breaker specifically - it's just one more reason an
+            # OnGrid call can fail, same contract as always.
+            raise OnGridError(str(exc)) from exc
+
         if not raw:
             return {}
         try:
@@ -218,12 +241,26 @@ class OnGridClient:
         (their report lambda is not callable), taking the status down with it.
         The report is fetched separately so one being unavailable cannot hide
         the other.
+
+        A plain GET — safe to retry on a transient failure (unlike
+        create_individual/upload_document, which are NOT retried here; see
+        docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phase 3 C4).
         """
-        return self._request("GET", f"/v1/individual/{individual_id}/verificationstatus")
+        return retry_with_backoff(
+            lambda: self._request("GET", f"/v1/individual/{individual_id}/verificationstatus"),
+            max_attempts=3,
+            retry_on=(OnGridError,),
+        )
 
     def consolidated_report(self, individual_id: str) -> dict[str, Any]:
-        """The report PDF's serving URL. Raises until every check has finished."""
-        return self._request("GET", f"/v1/individual/{individual_id}/report")
+        """The report PDF's serving URL. Raises until every check has finished.
+
+        A plain GET — safe to retry, same reasoning as verification_status."""
+        return retry_with_backoff(
+            lambda: self._request("GET", f"/v1/individual/{individual_id}/report"),
+            max_attempts=3,
+            retry_on=(OnGridError,),
+        )
 
     def request_check(
         self, individual_id: str, code: str, payload: dict[str, Any]

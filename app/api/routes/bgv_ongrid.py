@@ -278,20 +278,31 @@ class StatusResult(BaseModel):
     report (checks still running) must never be presented as the final one."""
     reportComplete: bool | None = None
     reason: str | None = None
+    """When this came from the cache (OnGrid unreachable, or a background
+    sync rather than this request) instead of a live OnGrid call just now."""
+    stale: bool = False
+    """When the cached/live status was last successfully written — lets HR
+    see "as of 10:42am" instead of assuming it's always live. See
+    docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phase 3 C4."""
+    syncedAt: str | None = None
 
 
-@router.get("/{candidate_id}/ongrid-status", response_model=StatusResult)
-def ongrid_status(
-    candidate_id: str,
-    settings: Settings = Depends(get_settings),
-    database: Database = Depends(get_database),
-) -> StatusResult:
-    """What OnGrid is actually running for this candidate, and the report if ready.
+def sync_ongrid_status(database: Database, settings: Settings, candidate_id: str) -> StatusResult:
+    """What OnGrid is actually running for this candidate, and the report if
+    ready. Called both from the on-demand `GET .../ongrid-status` route AND
+    from the periodic background sync job (app/services/job_handlers.py) —
+    one implementation, two callers.
 
     Deliberately read from OnGrid rather than from our own record. The two are
     not the same: `services` says what HR asked for, and checks selected before
     the per-offering endpoints existed were saved there but never started, so
     the stored list has claimed verifications that do not exist.
+
+    Falls back to the last successfully cached overall/checks (not just the
+    report link, as before Phase 3) when the live OnGrid call itself fails —
+    "if OnGrid is unavailable, preserve last known verification status,
+    indicate when it was last synced" (Phase 3 C4) — rather than simply
+    returning ok=False and losing a status HR could already see a moment ago.
 
     Takes `database`, not `repo` (a `Depends(get_repository)` would hold one
     pooled connection open for this whole handler via FastAPI's dependency
@@ -316,11 +327,27 @@ def ongrid_status(
         logger.info("OnGrid status skipped for candidate %s: foreign community", candidate_id)
         return StatusResult(ok=False, individualId=individual_id, reason=FOREIGN_COMMUNITY)
 
+    cached_status = bgv.get("ongridStatus") if isinstance(bgv.get("ongridStatus"), dict) else {}
+    cached_synced_at = bgv.get("ongridStatusAt")
+
     client = OnGridClient(settings)
     try:
         payload = client.verification_status(individual_id)
     except OnGridError as exc:
         logger.warning("OnGrid status failed for candidate %s: %s", candidate_id, exc)
+        if cached_status:
+            # Last known state beats an error — see docstring.
+            return StatusResult(
+                ok=True,
+                individualId=individual_id,
+                overallStatus=cached_status.get("overall"),
+                checks=cached_status.get("checks") or [],
+                reportUrl=cached_status.get("reportUrl"),
+                reportComplete=cached_status.get("reportComplete"),
+                stale=True,
+                syncedAt=cached_synced_at,
+                reason=str(exc),
+            )
         return StatusResult(ok=False, individualId=individual_id, reason=str(exc))
 
     overall, checks = bgv_checks.parse_status(payload)
@@ -354,18 +381,19 @@ def ongrid_status(
     # A link we already hold beats none at all: the report does not move once
     # it exists, so a failed fetch should not hide one we fetched before.
     if not report:
-        cached = report_url_from(bgv.get("ongridStatus"))
+        cached = report_url_from(cached_status)
         if cached:
             logger.info("Serving the cached OnGrid report link for candidate %s", candidate_id)
             report = cached
 
+    synced_at = _now()
     # Cached so the panel has something to show before this call returns, and
     # so the record keeps the last known state if OnGrid is unreachable.
     bgv["ongridStatus"] = {
         "overall": overall, "checks": checks,
         "reportUrl": report, "reportComplete": complete,
     }
-    bgv["ongridStatusAt"] = _now()
+    bgv["ongridStatusAt"] = synced_at
     # A fresh session, reacquired only now to persist the result — the one
     # above was already closed before the OnGrid calls (see the docstring).
     with database.repository() as repo:
@@ -378,7 +406,18 @@ def ongrid_status(
         checks=checks,
         reportUrl=str(report) if report else None,
         reportComplete=complete,
+        stale=False,
+        syncedAt=synced_at,
     )
+
+
+@router.get("/{candidate_id}/ongrid-status", response_model=StatusResult)
+def ongrid_status(
+    candidate_id: str,
+    settings: Settings = Depends(get_settings),
+    database: Database = Depends(get_database),
+) -> StatusResult:
+    return sync_ongrid_status(database, settings, candidate_id)
 
 
 @router.post("/{candidate_id}/ongrid-verify", response_model=VerifyResult)

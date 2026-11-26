@@ -23,6 +23,7 @@ from app.api.dependencies import get_google_calendar_service, get_repository
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.repositories.base import DocumentRepository
+from app.repositories.job_repository import JobRepository
 from app.services.google_calendar import GoogleCalendarService
 from app.services.sessions import COOKIE_NAME, read_session
 
@@ -55,6 +56,7 @@ def cleanup_calendar_events(
     service: GoogleCalendarService,
     settings: Settings,
     app_event_ids: Iterable[str],
+    job_repo: "JobRepository | None" = None,
 ) -> int:
     """Delete the Google Calendar events mapped to these app-event ids and drop
     their `calendar_links` rows. Google's ``sendUpdates="all"`` removes the event
@@ -69,6 +71,16 @@ def cleanup_calendar_events(
     (GoogleCalendarService._service), so a stalled one can no longer hang this
     cascade indefinitely; a candidate with many interviews just takes
     proportionally longer, it never hangs.
+
+    When `job_repo` is provided, a failed Google delete is additionally
+    enqueued as a `calendar_cleanup_retry` background job (see
+    app/services/job_handlers.py) instead of just being logged and dropped —
+    "if Google Calendar is unavailable... record cleanup jobs for retry...
+    preserve cleanup auditability" (Phase 3 C4). The `calendar_links` row is
+    still removed from OUR side either way (matching the pre-existing
+    best-effort contract exactly) — the retry job's job is only to keep
+    trying the GOOGLE-side delete so the event doesn't linger on an
+    attendee's calendar forever, not to keep the local bookkeeping alive.
     """
     ids = list(app_event_ids)
     if not ids:
@@ -90,6 +102,17 @@ def cleanup_calendar_events(
                 )
             except Exception:  # noqa: BLE001 - never block the caller on a Google error
                 logger.warning("Could not delete calendar event for %s", app_event_id)
+                if job_repo is not None:
+                    job_repo.enqueue(
+                        "calendar_cleanup_retry",
+                        {
+                            "appEventId": app_event_id,
+                            "calendarId": link.get("calendarId", settings.google_calendar_id),
+                            "googleEventId": link["googleEventId"],
+                        },
+                        idempotency_key=f"calendar-cleanup-retry:{app_event_id}:{link['googleEventId']}",
+                        max_attempts=5,
+                    )
         processed.append(app_event_id)
     return repo.delete_many(_LINKS_TABLE, processed)
 

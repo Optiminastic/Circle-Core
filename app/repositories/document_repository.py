@@ -8,7 +8,9 @@ callers never see raw driver exceptions (error tolerance).
 
 from __future__ import annotations
 
+import base64
 import json
+from datetime import datetime
 from typing import Any, Callable, TypeVar
 
 from sqlalchemy import text
@@ -29,6 +31,22 @@ def _as_dict(value: Any) -> Document:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+def _encode_cursor(created_at: datetime, item_id: str) -> str:
+    """Opaque keyset cursor: base64("<iso created_at>|<id>"). Callers must
+    treat it as a black box — only this module ever decodes one."""
+    raw = f"{created_at.isoformat()}|{item_id}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def _decode_cursor(cursor: str) -> tuple[str, str]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        created_at, item_id = raw.split("|", 1)
+        return created_at, item_id
+    except Exception as exc:  # noqa: BLE001 - any malformed input becomes the same clear error
+        raise ValueError("Invalid pagination cursor.") from exc
 
 
 class SqlAlchemyDocumentRepository:
@@ -192,6 +210,76 @@ class SqlAlchemyDocumentRepository:
             return [_as_dict(row[0]) for row in rows], total
         except SQLAlchemyError as exc:
             raise RepositoryError(f"Failed to paginate '{table}'") from exc
+
+    def list_cursor_paginated(
+        self,
+        table: str,
+        *,
+        limit: int,
+        cursor: str | None = None,
+        search: str | None = None,
+        search_fields: tuple[str, ...] = (),
+        sort_desc: bool = True,
+    ) -> tuple[list[Document], str | None]:
+        """Keyset (cursor) pagination on the stable `(created_at, id)` pair —
+        an ADDITIONAL, opt-in mode alongside `list_paginated`'s OFFSET
+        pagination, for a hot, large table (candidates) where a deep OFFSET
+        page still makes Postgres walk and discard every row before it.
+        Correct under concurrent inserts: a new row at the front of the
+        ordering never shifts an already-issued cursor's position, unlike
+        `OFFSET n`, which silently skips or repeats rows when the underlying
+        set changes between two page fetches. No arbitrary sort field here
+        (unlike list_paginated) — keyset pagination needs a single, totally
+        ordered key, and `created_at` already is one once `id` breaks ties.
+        See docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phase 3.
+
+        Raises ValueError (not RepositoryError) for a malformed cursor - a
+        client-input problem, not a database failure.
+        """
+        try:
+            where_clauses: list[str] = []
+            params: dict[str, Any] = {}
+
+            if search and search_fields:
+                ors = []
+                for i, field in enumerate(search_fields):
+                    key = f"search_field_{i}"
+                    params[key] = field
+                    ors.append(f"(data ->> :{key}) ILIKE :search_term")
+                where_clauses.append("(" + " OR ".join(ors) + ")")
+                params["search_term"] = f"%{search}%"
+
+            direction = "DESC" if sort_desc else "ASC"
+            if cursor:
+                cursor_created_at, cursor_id = _decode_cursor(cursor)
+                cmp_op = "<" if sort_desc else ">"
+                where_clauses.append(
+                    f"(created_at, id) {cmp_op} (CAST(:cursor_created_at AS TIMESTAMPTZ), :cursor_id)"
+                )
+                params["cursor_created_at"] = cursor_created_at
+                params["cursor_id"] = cursor_id
+
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            # One extra row fetched (never returned) just to know whether a
+            # next page exists, without a separate COUNT(*) query.
+            params["limit"] = limit + 1
+            rows = self._run(
+                lambda: self._session.execute(
+                    text(
+                        f'SELECT data, created_at, id FROM "{table}" {where_sql} '
+                        f"ORDER BY created_at {direction}, id {direction} LIMIT :limit"
+                    ),
+                    params,
+                ).fetchall()
+            )
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            next_cursor = (
+                _encode_cursor(page_rows[-1][1], page_rows[-1][2]) if has_more and page_rows else None
+            )
+            return [_as_dict(row[0]) for row in page_rows], next_cursor
+        except SQLAlchemyError as exc:
+            raise RepositoryError(f"Failed to cursor-paginate '{table}'") from exc
 
     def get(self, table: str, item_id: str) -> Document | None:
         try:
