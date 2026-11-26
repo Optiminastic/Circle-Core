@@ -106,34 +106,45 @@ class JobWorker:
             await asyncio.sleep(self._poll_interval)
 
     def _process_batch(self) -> int:
+        # Claim with a short-lived session, then release it BEFORE processing
+        # any job. A job's `future.result(timeout=...)` can block for up to
+        # that job type's full timeout (default 120s) waiting on an external
+        # call (OnGrid, Google Calendar) - holding a pooled DB connection for
+        # that whole span, times up to `batch_size` jobs processed
+        # sequentially, starved the connection pool in production (observed:
+        # a single `db_connection_held` of 125.9s). Same fix shape as
+        # app/api/routes/bgv_ongrid.py's sync_ongrid_status: release before
+        # the slow external work, reacquire only to persist the result.
         with self._database.session() as session:
-            repo = JobRepository(session)
-            jobs = repo.claim_due(
+            jobs = JobRepository(session).claim_due(
                 job_types=list(self._handlers), limit=self._batch_size, lease_seconds=self._lease_seconds
             )
-            for job in jobs:
-                self._process_one(repo, job)
-            return len(jobs)
+        for job in jobs:
+            self._process_one(job)
+        return len(jobs)
 
-    def _process_one(self, repo: JobRepository, job: JobRecord) -> None:
+    def _process_one(self, job: JobRecord) -> None:
         handler = self._handlers[job.job_type]
         timeout = self._timeouts[job.job_type]
         future = self._executor.submit(handler, job.payload)
         try:
             result = future.result(timeout=timeout)
-            repo.mark_completed(job.id, result)
+            with self._database.session() as session:
+                JobRepository(session).mark_completed(job.id, result)
             logger.info("Job %s (%s) completed.", job.id, job.job_type)
         except FutureTimeoutError:
-            self._fail_or_retry(repo, job, error=f"job timed out after {timeout}s")
+            self._fail_or_retry(job, error=f"job timed out after {timeout}s")
         except Exception as exc:  # noqa: BLE001 - a job's own failure must never kill the worker loop
             logger.exception("Job %s (%s) failed", job.id, job.job_type)
-            self._fail_or_retry(repo, job, error=str(exc))
+            self._fail_or_retry(job, error=str(exc))
 
-    def _fail_or_retry(self, repo: JobRepository, job: JobRecord, *, error: str) -> None:
-        if job.attempts + 1 >= job.max_attempts:
-            repo.mark_failed_permanently(job.id, error=error)
-            logger.warning("Job %s (%s) permanently failed: %s", job.id, job.job_type, error)
-        else:
-            delay = backoff_seconds(job.attempts)
-            repo.mark_retrying(job.id, error=error, retry_in_seconds=delay)
-            logger.info("Job %s (%s) retrying in %ss: %s", job.id, job.job_type, delay, error)
+    def _fail_or_retry(self, job: JobRecord, *, error: str) -> None:
+        with self._database.session() as session:
+            repo = JobRepository(session)
+            if job.attempts + 1 >= job.max_attempts:
+                repo.mark_failed_permanently(job.id, error=error)
+                logger.warning("Job %s (%s) permanently failed: %s", job.id, job.job_type, error)
+            else:
+                delay = backoff_seconds(job.attempts)
+                repo.mark_retrying(job.id, error=error, retry_in_seconds=delay)
+                logger.info("Job %s (%s) retrying in %ss: %s", job.id, job.job_type, delay, error)
