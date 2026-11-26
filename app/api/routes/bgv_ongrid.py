@@ -19,11 +19,12 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.api.dependencies import get_repository, get_storage, require_user
+from app.api.dependencies import get_database, get_repository, get_storage, require_user
 from app.core.config import Settings, get_settings
 from app.core.errors import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.api.routes.doc_requests import LETTER_KINDS, has_consent
+from app.db.database import Database
 from app.repositories.base import DocumentRepository
 from app.services import bgv_checks
 from app.services.ongrid import GENDER_TO_ONGRID, OnGridClient, OnGridError
@@ -283,7 +284,7 @@ class StatusResult(BaseModel):
 def ongrid_status(
     candidate_id: str,
     settings: Settings = Depends(get_settings),
-    repo: DocumentRepository = Depends(get_repository),
+    database: Database = Depends(get_database),
 ) -> StatusResult:
     """What OnGrid is actually running for this candidate, and the report if ready.
 
@@ -291,11 +292,22 @@ def ongrid_status(
     not the same: `services` says what HR asked for, and checks selected before
     the per-offering endpoints existed were saved there but never started, so
     the stored list has claimed verifications that do not exist.
+
+    Takes `database`, not `repo` (a `Depends(get_repository)` would hold one
+    pooled connection open for this whole handler via FastAPI's dependency
+    lifecycle) — `database.repository()` opens and closes its own session
+    around just the read and just the final write, so none is held open
+    across the up-to-2 sequential OnGrid HTTP calls (each up to 30s) in
+    between. Staff are known to poll this every ~20s per candidate; holding
+    a connection across that external call for the whole handler duration
+    could exhaust the pool under concurrent polling. See
+    docs/PERFORMANCE_AUDIT.md P1-1.
     """
     if not settings.has_ongrid:
         return StatusResult(ok=False, reason="not_configured")
 
-    bgv = repo.get(BGVS, candidate_id) or {}
+    with database.repository() as repo:
+        bgv = repo.get(BGVS, candidate_id) or {}
     individual_id = str(bgv.get("ongridIndividualId") or "")
     if not individual_id:
         return StatusResult(ok=False, reason="not_onboarded")
@@ -354,7 +366,10 @@ def ongrid_status(
         "reportUrl": report, "reportComplete": complete,
     }
     bgv["ongridStatusAt"] = _now()
-    repo.upsert(BGVS, candidate_id, bgv)
+    # A fresh session, reacquired only now to persist the result — the one
+    # above was already closed before the OnGrid calls (see the docstring).
+    with database.repository() as repo:
+        repo.upsert(BGVS, candidate_id, bgv)
 
     return StatusResult(
         ok=True,

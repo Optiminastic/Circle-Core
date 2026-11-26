@@ -14,8 +14,10 @@ import os
 from datetime import datetime, timedelta
 from typing import Any
 
+import httplib2
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
+from google_auth_httplib2 import AuthorizedHttp
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
@@ -37,6 +39,13 @@ _TOKEN_URI = "https://oauth2.googleapis.com/token"
 _MEET_TYPES = {"HR Call", "Interview"}
 
 _TIME_ZONE = "Asia/Kolkata"
+
+#: httplib2 (the transport googleapiclient uses) has NO timeout by default,
+#: so a stalled Google API call could hang indefinitely — blocking a
+#: scheduling request, or a candidate-delete cascade's cleanup, for as long
+#: as Google takes to respond (or forever on a dropped connection). See
+#: docs/PERFORMANCE_AUDIT.md P1-5.
+_HTTP_TIMEOUT_SECONDS = 15
 
 
 class GoogleCalendarService:
@@ -107,14 +116,16 @@ class GoogleCalendarService:
         return creds
 
     def _service(self, refresh_token: str):
-        return build(
-            "calendar", "v3", credentials=self._credentials(refresh_token), cache_discovery=False
+        http = AuthorizedHttp(
+            self._credentials(refresh_token), http=httplib2.Http(timeout=_HTTP_TIMEOUT_SECONDS)
         )
+        return build("calendar", "v3", http=http, cache_discovery=False)
 
     def _primary_email(self, creds: Credentials) -> str | None:
         """Best-effort: the primary calendar id is the account email."""
         try:
-            service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+            http = AuthorizedHttp(creds, http=httplib2.Http(timeout=_HTTP_TIMEOUT_SECONDS))
+            service = build("calendar", "v3", http=http, cache_discovery=False)
             cal = service.calendars().get(calendarId="primary").execute()
             return cal.get("id")
         except Exception:  # noqa: BLE001

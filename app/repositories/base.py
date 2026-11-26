@@ -23,8 +23,25 @@ class DocumentRepository(Protocol):
 
     def count(self, table: str, match: Document | None = None) -> int: ...
 
+    def list_paginated(
+        self,
+        table: str,
+        *,
+        page: int,
+        limit: int,
+        filters: Document | None = None,
+        search: str | None = None,
+        search_fields: tuple[str, ...] = (),
+        sort_field: str = "createdAt",
+        sort_desc: bool = False,
+    ) -> tuple[list[Document], int]: ...
+
     def get(self, table: str, item_id: str) -> Document | None: ...
+
+    def get_many(self, table: str, item_ids: list[str]) -> dict[str, Document]: ...
 
     def upsert(self, table: str, item_id: str, data: Document) -> Document: ...
 
     def delete(self, table: str, item_id: str) -> bool: ...
+
+    def delete_many(self, table: str, item_ids: list[str]) -> int: ...

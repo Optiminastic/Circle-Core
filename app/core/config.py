@@ -24,15 +24,33 @@ class Settings(BaseSettings):
     database_url: str = ""
     auto_create_tables: bool = True
 
-    # DB pool tuning (scalability). pool_size is sized to the post-login
-    # prefetch burst so overflow connections (which are torn down on check-in
-    # and pay a fresh TLS handshake next time) are rarely needed.
-    db_pool_size: int = 12
-    db_max_overflow: int = 8
-    db_pool_timeout: int = 30
-    # Recycle pooled connections before the server/pooler idle-closes them
-    # (Neon's pooler kills idle server connections after ~5 min).
-    db_pool_recycle: int = 240
+    # DB pool tuning (scalability). Previously sized for a REMOTE pooled
+    # database (Neon) reached over the internet from every uvicorn worker;
+    # the actual deployment is a self-hosted Postgres container co-located on
+    # the same Hetzner VPS (shared with two unrelated apps, avora and o2) —
+    # see docs/PERFORMANCE_AUDIT.md P1-2. Re-tuned down accordingly: with
+    # `--workers 2` (Dockerfile), (6+4)*2 = 20 max connections from this app,
+    # not (12+8)*2 = 40, leaving headroom for the other apps' own containers
+    # on the same host instead of assuming this app owns all of it.
+    db_pool_size: int = 6
+    db_max_overflow: int = 4
+    # Fail fast under genuine contention instead of queueing a request for up
+    # to 30s waiting on a pool slot — a caller gets a clear 503-ish error
+    # quickly rather than a request that "hangs" for half a minute.
+    db_pool_timeout: int = 10
+    # No longer specifically defending against a remote pooler's idle-kill
+    # (that was Neon-specific, see above) — a self-hosted Postgres on the
+    # same host doesn't impose that. Recycling periodically regardless is
+    # still cheap, low-value insurance against a connection going stale for
+    # some other reason.
+    db_pool_recycle: int = 1800
+    # Postgres kills any query running longer than this, server-side — caps
+    # the worst case for an unbounded/runaway query (and the connection it
+    # holds) instead of letting it run indefinitely. See
+    # docs/PERFORMANCE_AUDIT.md P0-4. 5s is generous for this app's normal
+    # queries; override per-deployment via DB_STATEMENT_TIMEOUT_MS if a
+    # legitimate slow admin/export query ever needs more.
+    db_statement_timeout_ms: int = 5000
 
     # NoDecode: skip pydantic-settings' JSON decoding so the validator can accept
     # a plain comma-separated string from .env.

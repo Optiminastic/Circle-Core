@@ -112,6 +112,87 @@ class SqlAlchemyDocumentRepository:
         except SQLAlchemyError as exc:
             raise RepositoryError(f"Failed to count '{table}'") from exc
 
+    def list_paginated(
+        self,
+        table: str,
+        *,
+        page: int,
+        limit: int,
+        filters: Document | None = None,
+        search: str | None = None,
+        search_fields: tuple[str, ...] = (),
+        sort_field: str = "createdAt",
+        sort_desc: bool = False,
+    ) -> tuple[list[Document], int]:
+        """Database-side paginated list: filtering, free-text search, and
+        sorting all happen in SQL — never fetch-everything-then-slice-in-Python.
+        See docs/PERFORMANCE_AUDIT.md P0-2.
+
+        Every identifier that varies per call (the search field names, the
+        sort field) is passed as a genuine bind parameter, never spliced into
+        the SQL text, even though `sort_field`/`search_fields` are validated
+        against a per-resource allowlist one layer up (ResourceService) —
+        `data ->> :key` accepts a bound parameter for the JSONB key just as
+        readily as a literal, so there is no reason to trust the allowlist
+        alone. `page`/`limit` are already-validated plain ints, not strings.
+        `sort_desc`/the ASC-vs-DESC choice is a Python bool, not a spliced
+        string, since direction can't be parameterized in SQL. Only the ONE
+        truly unparameterizable piece is the real `created_at` column name
+        for the one magic sort field — a hardcoded literal, never user input.
+        """
+        try:
+            where_clauses: list[str] = []
+            params: dict[str, Any] = {}
+
+            if filters:
+                where_clauses.append("data @> CAST(:filters AS JSONB)")
+                params["filters"] = json.dumps(filters)
+
+            if search and search_fields:
+                ors = []
+                for i, field in enumerate(search_fields):
+                    key = f"search_field_{i}"
+                    params[key] = field
+                    ors.append(f"(data ->> :{key}) ILIKE :search_term")
+                where_clauses.append("(" + " OR ".join(ors) + ")")
+                params["search_term"] = f"%{search}%"
+
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+            if sort_field == "createdAt":
+                order_expr = "created_at"
+            else:
+                order_expr = "(data ->> :sort_field)"
+                params["sort_field"] = sort_field
+            direction = "DESC" if sort_desc else "ASC"
+            # `id` is a stable tie-breaker so pagination never skips/repeats a
+            # row when the sort field has duplicate values across pages.
+            # NULLS LAST regardless of direction: a row missing the sort
+            # field entirely must never masquerade as the "newest"/"first"
+            # one just because Postgres's default null-ordering for DESC is
+            # NULLS FIRST.
+            order_sql = f"ORDER BY {order_expr} {direction} NULLS LAST, id ASC"
+
+            count_row = self._run(
+                lambda: self._session.execute(
+                    text(f'SELECT count(*) FROM "{table}" {where_sql}'), dict(params)
+                ).fetchone()
+            )
+            total = int(count_row[0]) if count_row else 0
+
+            list_params = dict(params)
+            list_params["limit"] = limit
+            list_params["offset"] = max(0, (page - 1) * limit)
+            rows = self._run(
+                lambda: self._session.execute(
+                    text(f'SELECT data FROM "{table}" {where_sql} {order_sql} LIMIT :limit OFFSET :offset'),
+                    list_params,
+                ).fetchall()
+            )
+            return [_as_dict(row[0]) for row in rows], total
+        except SQLAlchemyError as exc:
+            raise RepositoryError(f"Failed to paginate '{table}'") from exc
+
     def get(self, table: str, item_id: str) -> Document | None:
         try:
             row = self._run(
@@ -122,6 +203,24 @@ class SqlAlchemyDocumentRepository:
             return _as_dict(row[0]) if row else None
         except SQLAlchemyError as exc:
             raise RepositoryError(f"Failed to read '{table}/{item_id}'") from exc
+
+    def get_many(self, table: str, item_ids: list[str]) -> dict[str, Document]:
+        """Batched PK lookup — one query instead of one `get()` per id.
+
+        See docs/PERFORMANCE_AUDIT.md P1-5: calendar.py's cleanup cascade
+        used to call `get()` once per event in a loop."""
+        if not item_ids:
+            return {}
+        try:
+            rows = self._run(
+                lambda: self._session.execute(
+                    text(f'SELECT id, data FROM "{table}" WHERE id = ANY(:ids)'),
+                    {"ids": item_ids},
+                ).fetchall()
+            )
+            return {row[0]: _as_dict(row[1]) for row in rows}
+        except SQLAlchemyError as exc:
+            raise RepositoryError(f"Failed to batch-read '{table}'") from exc
 
     def upsert(self, table: str, item_id: str, data: Document) -> Document:
         try:
@@ -152,3 +251,20 @@ class SqlAlchemyDocumentRepository:
         except SQLAlchemyError as exc:
             self._session.rollback()
             raise RepositoryError(f"Failed to delete '{table}/{item_id}'") from exc
+
+    def delete_many(self, table: str, item_ids: list[str]) -> int:
+        """Batched delete — one query instead of one `delete()` per id. See
+        docs/PERFORMANCE_AUDIT.md P1-5 (calendar.py's cleanup cascade)."""
+        if not item_ids:
+            return 0
+        try:
+            result = self._run(
+                lambda: self._session.execute(
+                    text(f'DELETE FROM "{table}" WHERE id = ANY(:ids)'), {"ids": item_ids}
+                )
+            )
+            self._session.commit()
+            return result.rowcount
+        except SQLAlchemyError as exc:
+            self._session.rollback()
+            raise RepositoryError(f"Failed to batch-delete '{table}'") from exc

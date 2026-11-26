@@ -8,7 +8,11 @@ database does not crash the process — endpoints degrade to 503 instead.
 
 from __future__ import annotations
 
-from sqlalchemy import create_engine, text
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
+
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -18,6 +22,8 @@ from app.core.errors import RepositoryError
 from app.core.logging import get_logger
 from app.core.perf import instrument_engine
 from app.repositories import identity_outbox_repository as identity_outbox
+from app.repositories.base import DocumentRepository
+from app.repositories.document_repository import SqlAlchemyDocumentRepository
 
 logger = get_logger("curcle.db")
 
@@ -78,18 +84,24 @@ class Database:
             logger.warning("DATABASE_URL is not set — the API will start but data endpoints return 503.")
             return
         try:
-            # Latency tuning for a remote (e.g. Neon) database where every round
-            # trip costs real wall-clock time:
-            #  - AUTOCOMMIT: every repository operation is a single statement, so
-            #    skipping the implicit BEGIN + COMMIT/ROLLBACK saves 2 RTTs/request.
-            #  - pool_recycle instead of pool_pre_ping: pre_ping costs a SELECT 1
-            #    RTT on every checkout; recycling connections before the server's
-            #    idle timeout achieves the same safety for free.
-            #  - TCP keepalives keep pooled connections alive through NAT/idle.
+            # AUTOCOMMIT: every repository operation is a single statement, so
+            # skipping the implicit BEGIN + COMMIT/ROLLBACK saves a round trip
+            # per request — still worth keeping even now that the deployment
+            # is a co-located Postgres, not a remote one.
+            #
+            # pool_pre_ping=True: re-enabled — see docs/PERFORMANCE_AUDIT.md
+            # P1-1/P1-2. It used to be off specifically because a SELECT 1 RTT
+            # on every checkout was expensive against a remote serverless DB
+            # (Neon); against a same-host container that RTT is sub-millisecond,
+            # so there's no longer a reason to skip the safety it buys (a
+            # connection killed by local resource pressure, not just a remote
+            # pooler's idle timeout, now surfaces before a real query hits it).
+            #
+            # TCP keepalives keep pooled connections alive through NAT/idle.
             self._engine = create_engine(
                 self._settings.sqlalchemy_url,
                 isolation_level="AUTOCOMMIT",
-                pool_pre_ping=False,
+                pool_pre_ping=True,
                 pool_recycle=self._settings.db_pool_recycle,
                 pool_size=self._settings.db_pool_size,
                 max_overflow=self._settings.db_max_overflow,
@@ -103,6 +115,23 @@ class Database:
                 },
                 future=True,
             )
+            # statement_timeout — bounds any single query's worst case
+            # server-side; see docs/PERFORMANCE_AUDIT.md P0-4. Applied as a
+            # `SET` on every new pooled connection via this `connect` event,
+            # NOT as a libpq startup parameter (`options=-c statement_timeout=...`):
+            # that form is REJECTED outright by Neon's pooled/PgBouncer
+            # endpoint ("unsupported startup parameter in options") — which
+            # is exactly what the dev/staging DATABASE_URL in this repo
+            # points at. Production's self-hosted, unpooled Postgres would
+            # have accepted either form, but a `SET` after connect works
+            # everywhere this app actually runs, dev included.
+            @event.listens_for(self._engine, "connect")
+            def _set_statement_timeout(dbapi_connection: Any, connection_record: Any) -> None:  # noqa: ANN401
+                cursor = dbapi_connection.cursor()
+                try:
+                    cursor.execute(f"SET statement_timeout = {self._settings.db_statement_timeout_ms}")
+                finally:
+                    cursor.close()
             self._session_factory = sessionmaker(bind=self._engine, expire_on_commit=False, future=True)
             instrument_engine(self._engine)
             logger.info("Database engine initialized.")
@@ -123,6 +152,27 @@ class Database:
         if self._session_factory is None:
             raise RepositoryError("Database is not configured. Set DATABASE_URL and restart.")
         return self._session_factory()
+
+    @contextmanager
+    def repository(self) -> Iterator[DocumentRepository]:
+        """A short-lived DocumentRepository backed by its own session, closed
+        on exit. For a handler that needs explicit control over exactly when
+        a pooled connection is released — e.g. around a slow external HTTP
+        call — rather than holding one open for FastAPI's whole
+        `Depends(get_repository)` request lifecycle. See
+        docs/PERFORMANCE_AUDIT.md P1-1 (bgv_ongrid.ongrid_status).
+
+        Deliberately returns the `DocumentRepository` Protocol, not the
+        concrete `SqlAlchemyDocumentRepository` — callers (and their tests)
+        depend only on the abstraction; this is the one place, the "database
+        access boundary" per this module's own docstring, that is allowed to
+        know the concrete implementation.
+        """
+        session = self.session()
+        try:
+            yield SqlAlchemyDocumentRepository(session)
+        finally:
+            session.close()
 
     def healthcheck(self) -> bool:
         if self._engine is None:
