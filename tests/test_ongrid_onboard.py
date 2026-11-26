@@ -10,6 +10,7 @@ Stubs only, so these need no database and no network.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -241,12 +242,27 @@ def test_which_records_belong_here(stored: str, configured: str, expected: bool)
     )
 
 
+class _FakeDatabase:
+    """Stands in for app.db.database.Database: ongrid_status now takes
+    `database` (not `repo`) so it can explicitly close the session before
+    making OnGrid calls — see docs/PERFORMANCE_AUDIT.md P1-1. Its
+    `.repository()` yields the SAME fake repo every time, same as the old
+    single `repo=` kwarg this replaces."""
+
+    def __init__(self, repo: _Repo) -> None:
+        self._repo = repo
+
+    @contextmanager
+    def repository(self) -> Any:
+        yield self._repo
+
+
 def test_status_refuses_to_read_a_foreign_individual(client: Any) -> None:
     repo = _Repo({"id": CANDIDATE_ID, "ongridIndividualId": "191569", "ongridCommunityId": "79355"})
     result = bgv_ongrid.ongrid_status(
         candidate_id=CANDIDATE_ID,
         settings=_settings_for("187363"),
-        repo=repo,  # type: ignore[arg-type]
+        database=_FakeDatabase(repo),  # type: ignore[arg-type]
     )
     assert result.ok is False
     assert result.reason == bgv_ongrid.FOREIGN_COMMUNITY

@@ -61,12 +61,24 @@ def cleanup_calendar_events(
     from every attendee's calendar (HR, interviewer, candidate). Best-effort — a
     missing link or a Google failure is skipped, never raised, so it can be called
     from a cascade delete without blocking it. Returns the number of links removed.
+
+    The DB side is batched (one `get_many` + one `delete_many` instead of one
+    `get`/`delete` per event — see docs/PERFORMANCE_AUDIT.md P1-5). The Google
+    side still makes one HTTP call per event — Google's API has no bulk-delete
+    endpoint for this — but each call now has an explicit timeout
+    (GoogleCalendarService._service), so a stalled one can no longer hang this
+    cascade indefinitely; a candidate with many interviews just takes
+    proportionally longer, it never hangs.
     """
+    ids = list(app_event_ids)
+    if not ids:
+        return 0
     conn = _connection(repo)
     refresh_token = (conn or {}).get("refreshToken")
-    removed = 0
-    for app_event_id in app_event_ids:
-        link = repo.get(_LINKS_TABLE, app_event_id)
+    links = repo.get_many(_LINKS_TABLE, ids)
+    processed: list[str] = []
+    for app_event_id in ids:
+        link = links.get(app_event_id)
         if not link or not link.get("googleEventId"):
             continue
         if refresh_token:
@@ -78,9 +90,8 @@ def cleanup_calendar_events(
                 )
             except Exception:  # noqa: BLE001 - never block the caller on a Google error
                 logger.warning("Could not delete calendar event for %s", app_event_id)
-        repo.delete(_LINKS_TABLE, app_event_id)
-        removed += 1
-    return removed
+        processed.append(app_event_id)
+    return repo.delete_many(_LINKS_TABLE, processed)
 
 
 @router.get("/status")

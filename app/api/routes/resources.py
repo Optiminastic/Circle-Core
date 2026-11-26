@@ -16,7 +16,7 @@ from app.core.config import Settings, get_settings
 from app.domain.registry import get_resource
 from app.services.audit_service import AuditService
 from app.services.identity_sync import IdentitySyncService
-from app.services.resource_service import ResourceService
+from app.services.resource_service import PAGE_SIZE_DEFAULT, ResourceService
 from app.services.sessions import COOKIE_NAME, read_session
 
 Document = dict[str, Any]
@@ -203,10 +203,31 @@ def list_all(
     resource: str,
     limit: int | None = None,
     offset: int = 0,
+    page: int | None = None,
+    search: str | None = None,
+    sortBy: str | None = None,
+    sortOrder: str = "asc",
     service: ResourceService = Depends(get_resource_service),
-) -> list[Document]:
-    # Pagination is opt-in: without `limit` the full list is returned (unchanged
-    # behavior); pass `?limit=50&offset=100` to page through large resources.
+) -> list[Document] | dict[str, Any]:
+    # `page` opts into the new {data, pagination} contract (database-side
+    # LIMIT/OFFSET, search, sort - see docs/PERFORMANCE_AUDIT.md P0-2 and
+    # ResourceService.list_paginated). Without it, behavior is byte-for-byte
+    # unchanged from before this phase: a bare array, optional limit/offset.
+    # Deliberately opt-in, not a breaking change to every existing caller at
+    # once - circle-be (Coolify) and circle-fe (Vercel) deploy independently,
+    # so the old frontend build must keep working against the new backend
+    # until it's redeployed with the migrated client. See
+    # docs/PERFORMANCE_IMPLEMENTATION_LOG.md Phase 2.
+    if page is not None:
+        result = service.list_paginated(
+            get_resource(resource),
+            page=page,
+            limit=limit if limit is not None else PAGE_SIZE_DEFAULT,
+            search=search,
+            sort_by=sortBy,
+            sort_order=sortOrder,
+        )
+        return result.to_dict()
     return service.list(get_resource(resource), limit=limit, offset=offset)
 
 

@@ -35,6 +35,7 @@ from app.api.routes import (
     resources,
     sarvam_webhook,
     screening_calls,
+    stats,
     test_public,
     vapi_webhook,
 )
@@ -278,6 +279,8 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     # Admin-only audit trail (/api/audit/*) — literal path, before the generic router.
     app.include_router(audit.router)
+    # Dashboard aggregates (/api/stats/*) — literal path, before the generic router.
+    app.include_router(stats.router)
     # Hardened public router must precede the generic resources router so its
     # literal /api/public/* paths win over "/api/{resource}".
     app.include_router(public.router)
