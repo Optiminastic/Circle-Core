@@ -61,6 +61,13 @@ class _Repo:
     def list(self, table: str) -> list[dict[str, Any]]:
         return [dict(self.doc_request)] if table == bgv_ongrid.DOC_REQUESTS else []
 
+    def find(self, table: str, match: dict[str, Any]) -> list[dict[str, Any]]:
+        # Mirrors the real repo's indexed JSONB containment: every key/value
+        # pair in `match` must equal the row's. See docs/PERFORMANCE_AUDIT.md
+        # P1-4 — _pick_doc_request/_document_for/_portal_field call this
+        # instead of list()+filter now.
+        return [row for row in self.list(table) if all(row.get(k) == v for k, v in match.items())]
+
     def upsert(self, table: str, key: str, data: dict[str, Any]) -> dict[str, Any]:
         self.rows[table] = data
         self.writes.append(data)

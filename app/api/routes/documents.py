@@ -173,7 +173,7 @@ def list_documents(
 
 
 @router.post("", status_code=201)
-async def upload_document(
+def upload_document(
     entityType: str = Form(...),
     entityId: str = Form(...),
     category: str = Form("document"),
@@ -182,7 +182,10 @@ async def upload_document(
     storage: FileStorage = Depends(get_storage),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    data = await file.read()
+    # Plain `def`: thread-pooled by Starlette, like every other sync handler
+    # here, instead of blocking the event loop for the storage/DB calls
+    # below. See docs/PERFORMANCE_AUDIT.md P0-1.
+    data = file.file.read()
     if not data:
         raise ValidationError("Empty file.")
     limit = settings.max_upload_mb * 1024 * 1024

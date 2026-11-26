@@ -161,7 +161,7 @@ _PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif")
 
 
 @router.post("/{token}/photo", status_code=201)
-async def upload_joining_photo(
+def upload_joining_photo(
     token: str,
     file: UploadFile = File(...),
     repo: DocumentRepository = Depends(get_repository),
@@ -181,7 +181,9 @@ async def upload_joining_photo(
     if _is_expired(record):
         raise ValidationError("This link has expired. Please ask HR for a new one.")
 
-    data = await file.read()
+    # Plain `def`: thread-pooled by Starlette instead of blocking the event
+    # loop for the storage/DB calls below. See docs/PERFORMANCE_AUDIT.md P0-1.
+    data = file.file.read()
     if not data:
         raise ValidationError("That file appears to be empty.")
     if len(data) > _PHOTO_MAX_BYTES:

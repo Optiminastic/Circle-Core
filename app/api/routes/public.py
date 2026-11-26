@@ -442,7 +442,7 @@ class ApplicationIn(BaseModel):
 
 
 @router.post("/apply", status_code=201)
-async def apply(
+def apply(
     background_tasks: BackgroundTasks,
     payload: str = Form(...),
     resume: UploadFile = File(...),
@@ -509,7 +509,11 @@ async def apply(
         raise ValidationError("You have already applied to this role with this email.")
 
     # 3) Validate the resume bytes — must be a real, non-empty PDF within limit.
-    data = await resume.read()
+    # Plain `def`: thread-pooled by Starlette instead of blocking the event
+    # loop for the storage/DB calls and resume-keyword extraction below —
+    # this is the highest-traffic public endpoint of the six. See
+    # docs/PERFORMANCE_AUDIT.md P0-1.
+    data = resume.file.read()
     if not data:
         raise ValidationError("Please attach your resume.")
     limit = settings.max_upload_mb * 1024 * 1024

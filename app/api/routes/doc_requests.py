@@ -141,7 +141,7 @@ def needs_consent(request: dict[str, Any]) -> bool:
 
 
 @router.post("/{token}/upload", status_code=201)
-async def upload_request_document(
+def upload_request_document(
     token: str,
     docType: str = Form(...),
     file: UploadFile = File(...),
@@ -179,7 +179,19 @@ async def upload_request_document(
             "This document has already been verified and locked. It can no longer be replaced."
         )
 
-    data = await file.read()
+    # Plain `def`, not `async def`: FastAPI runs this whole handler in
+    # Starlette's thread pool instead of on the event loop, like every other
+    # sync handler in this codebase. That matters here because the storage
+    # upload, the two repo.upsert() calls, and (for an image/PDF) the OCR
+    # extraction below are all blocking — with only 2 uvicorn workers in
+    # production, running them on the event loop would freeze that whole
+    # worker (and every unrelated request routed to it) for the entire
+    # upload. See docs/PERFORMANCE_AUDIT.md P0-1. `file.file` is the
+    # underlying (sync) SpooledTemporaryFile — reading it directly, rather
+    # than the async `await file.read()`, is what a plain `def` handler
+    # needs, and the UploadFile stays open and readable for the whole
+    # handler either way (nothing here defers work past the response).
+    data = file.file.read()
     if not data:
         raise ValidationError("Empty file.")
     limit = settings.max_upload_mb * 1024 * 1024

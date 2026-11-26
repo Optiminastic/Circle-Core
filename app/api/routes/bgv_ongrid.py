@@ -52,11 +52,14 @@ def _phone_digits(raw: str) -> str:
 def _pick_doc_request(repo: DocumentRepository, candidate_id: str) -> dict[str, Any] | None:
     """The candidate's joining-docs request with the most content (resends mint
     new links, so several can exist; the fullest one is the real submission)."""
+    # Indexed JSONB containment (GIN) instead of a full-table scan — see
+    # docs/PERFORMANCE_AUDIT.md P1-4. "kind not in LETTER_KINDS" still has to
+    # be filtered in Python: containment matches an exact field, not a
+    # negated membership test.
     requests = [
         r
-        for r in repo.list(DOC_REQUESTS)
-        if r.get("candidateId") == candidate_id
-        and r.get("kind") not in LETTER_KINDS
+        for r in repo.find(DOC_REQUESTS, {"candidateId": candidate_id})
+        if r.get("kind") not in LETTER_KINDS
     ]
     if not requests:
         return None
@@ -119,10 +122,11 @@ def _document_for(
     one missed, so a candidate's documents are routinely spread across several.
     Prefers a verified submission, then the most recent.
     """
+    # Indexed JSONB containment (GIN) instead of a full-table scan — see
+    # docs/PERFORMANCE_AUDIT.md P1-4.
     submissions = [
         s
-        for request in repo.list(DOC_REQUESTS)
-        if request.get("candidateId") == candidate_id
+        for request in repo.find(DOC_REQUESTS, {"candidateId": candidate_id})
         for s in request.get("submissions") or []
         if s.get("docType") == doc_type
     ]
@@ -147,11 +151,13 @@ def _portal_field(repo: DocumentRepository, candidate_id: str, key: str) -> Any:
     """One value the candidate entered, from whichever of their document
     requests holds it. Links get re-issued, so their answers end up spread
     across several records and only one of them will have any given field."""
+    # Indexed JSONB containment (GIN) instead of a full-table scan — see
+    # docs/PERFORMANCE_AUDIT.md P1-4.
     return next(
         (
             request[key]
-            for request in repo.list(DOC_REQUESTS)
-            if request.get("candidateId") == candidate_id and request.get(key)
+            for request in repo.find(DOC_REQUESTS, {"candidateId": candidate_id})
+            if request.get(key)
         ),
         None,
     )
