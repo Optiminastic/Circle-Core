@@ -19,10 +19,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
-from app.api.dependencies import get_repository, get_storage
+from app.api.dependencies import get_database, get_repository, get_storage
 from app.core.config import Settings, get_settings
 from app.core.errors import NotFoundError, ValidationError
 from app.core.logging import get_logger
+from app.db.database import Database
 from app.repositories.base import DocumentRepository
 from app.services.sessions import COOKIE_NAME, read_session
 from app.storage.base import FileStorage
@@ -298,7 +299,7 @@ def preview_document(
     doc_id: str,
     request: Request,
     settings: Settings = Depends(get_settings),
-    repo: DocumentRepository = Depends(get_repository),
+    database: Database = Depends(get_database),
     storage: FileStorage = Depends(get_storage),
 ) -> Response:
     """Stream a document inline so it opens in the browser tab (no download).
@@ -306,8 +307,18 @@ def preview_document(
     Unlike the presigned `/url` route, this proxies the bytes through the API and
     sets `Content-Disposition: inline` ourselves — reliable regardless of whether
     the object store honours response-header overrides.
+
+    Takes `database`, not `repo` (a `Depends(get_repository)` would hold one
+    pooled connection open for this whole handler via FastAPI's dependency
+    lifecycle) — `database.repository()` opens and closes its own session
+    around just the lookup, so none is held open across the S3 `get_object`
+    + full-body download that follows (observed live: 800ms-1.7s per
+    preview, well above this session's other db_connection_held
+    thresholds). See docs/PERFORMANCE_AUDIT.md P1-1, same shape as
+    bgv_ongrid.sync_ongrid_status.
     """
-    doc = _get_or_404(repo, doc_id)
+    with database.repository() as repo:
+        doc = _get_or_404(repo, doc_id)
     _require_view_access(request, settings, doc)
     data, stored_type = storage.get(doc["storageKey"])
     filename = _safe_name(doc.get("fileName") or "file")
